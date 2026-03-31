@@ -1,0 +1,24 @@
+# Geodaten (zu gross fuer Git)
+dgm/
+dom/
+LoD2/
+atkis/
+
+# Generierte Minecraft-Welt
+thuringen2minecraft_output/
+minecraft_ilmenau/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Debug/Test-Artefakte
+*.mca
+*.dat
+
+# IDE
+.vscode/
+.idea/
