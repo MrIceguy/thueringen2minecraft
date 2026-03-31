@@ -1,24 +1,88 @@
-# Geodaten (zu gross fuer Git)
+# -----------------------------
+# Python
+# -----------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.env
+.venv/
+venv/
+
+# Jupyter / IPython
+.ipynb_checkpoints/
+
+# -----------------------------
+# Betriebssystem / Editor
+# -----------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# VSCode
+.vscode/
+
+# -----------------------------
+# Geo-Daten (NICHT ins Repo!)
+# -----------------------------
+# GeoTIFF (DGM/DOM)
+*.tif
+*.tiff
+*.tfw
+
+# CityGML LoD2
+*.gml
+*.xml
+
+# Shapefiles (ATKIS)
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.qpj
+
+# Rasterdaten
+*.asc
+*.bil
+*.hdr
+
+# -----------------------------
+# Minecraft Weltordner
+# -----------------------------
+# (damit du nicht versehentlich 500 MB hochlädst)
+world/
+world*/ 
+*.mca
+*.dat_old
+
+# -----------------------------
+# Logs / Cache
+# -----------------------------
+*.log
+.cache/
+tmp/
+temp/
+
+# -----------------------------
+# Bilder / große Dateien
+# -----------------------------
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.zip
+*.7z
+*.rar
+
+# -----------------------------
+# Projekt-spezifische Ordner
+# -----------------------------
 dgm/
 dom/
 LoD2/
 atkis/
-
-# Generierte Minecraft-Welt
-thuringen2minecraft_output/
-minecraft_ilmenau/
-
-# Python
-__pycache__/
-*.pyc
-*.pyo
-.venv/
-venv/
-
-# Debug/Test-Artefakte
-*.mca
-*.dat
-
-# IDE
-.vscode/
-.idea/
+output/
+export/
