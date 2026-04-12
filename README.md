@@ -19,6 +19,10 @@ python thueringen2minecraft.py --bbox 641608 642172 5649006 5649363
 
 ![Erfurt Domplatz Ingame](docs/erfurt_domplatz.png)
 
+📦 **Beispielwelt direkt herunterladen** (119 MB, 7z):  
+[thuringen2minecraft_output_erfurt01.7z](http://e.pc.cd/PvMy6alK)  
+→ Entpacken nach `%AppData%\.minecraft\saves\`
+
 ---
 
 ## ⚠️ Known Bugs

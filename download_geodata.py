@@ -37,7 +37,7 @@ def url_dom(e_km, n_km):
     return f"{BASE_GEO}/hoehendaten/DOM/dom_2020-2025/dom1_32_{e_km}_{n_km}_1_th_2020-2025.zip"
 
 def url_lod2(e_km, n_km):
-    return f"{BASE_GEO}/LoD2/LoD2_32_{e_km}_{n_km}_2_TH.zip"
+    return f"{BASE_GEO}/3dgebaeude/LoD2/LoD2_32_{e_km}_{n_km}_2_TH.zip"
 
 # ATKIS: Thueringen komplett (nicht kachelweise)
 DL_BASE   = f"{BASE_GEO}/gaialight-th/_apps/dladownload/index.php"

@@ -604,17 +604,16 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
                     else:
                         writer.set_block(bx, sy, bz, osm_block)
 
-                # Baeume auf Wald/Gruenland-Pixeln — nicht nah an Gebaeuden
-                # und nicht auf nDSM-erkannten Gebaeuden (Kaufland, Eishalle etc. ohne LoD2)
+                # Baeume auf Wald/Gruenland — nicht auf Ackerland (33), nicht nah an Gebaeuden
                 if osm_val in (30, 31):
                     h = float(ndsm[row, col])
-                    if h < 4.0:   # nDSM zu niedrig oder leer → Standardhöhe
-                        h = 7.0 if osm_val == 30 else 5.0  # Wald=7m, Wiese=5m
+                    if h < 4.0:
+                        h = 7.0 if osm_val == 31 else 5.0  # Wald=7m, Wiese=5m
                     ndsm_cls_val = int(ndsm_classes[row, col])
                     if h > 2.0 and not building_bool[row, col] and ndsm_cls_val != 1:
                         near_building = building_bool[
-                            max(0,row-4):min(H,row+5),
-                            max(0,col-4):min(W,col+5)
+                            max(0,row-8):min(H,row+9),   # 8px Abstand statt 4
+                            max(0,col-8):min(W,col+9)
                         ].any()
                         if not near_building:
                             seed = (row * 7 + col * 13) % 10

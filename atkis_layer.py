@@ -44,6 +44,7 @@ OSM_CLASSES = {
     30: ("minecraft:grass_block",          0,   1, "Grünland / Wiese"),
     31: ("minecraft:moss_block",           0,   1, "Wald"),
     32: ("minecraft:sand",                 0,   2, "Sandfläche"),
+    33: ("minecraft:dirt",                 0,   1, "Ackerland"),  # keine Bäume
 }
 
 def get_osm_block(osm_value):
@@ -132,14 +133,14 @@ VEGETATION_MAP = {
     "AX_Sumpf":             30,
     "AX_Landwirtschaft":    30,
     "AX_Grünland":          30,
-    "AX_Ackerland":         30,
+    "AX_Ackerland":         33,
     "43001": 31,  # Wald
     "43002": 31,  # Gehölz
     "43003": 30,  # Heide
     "43004": 30,  # Moor
     "43005": 30,  # Sumpf
     "43006": 30,  # Grünland
-    "41001": 30,  # Ackerland
+    "41001": 33,  # Ackerland — keine Bäume
     "41002": 30,  # Gartenland
     "41003": 30,  # Obstplantage
 }
