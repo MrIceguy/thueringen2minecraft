@@ -122,7 +122,45 @@ def parse_gml_file(filepath):
     def findall(el, tag, ns):
         return el.findall(f".//{{{ns}}}{tag}")
 
-    for bldg in findall(root, "Building", bldg_ns):
+    # Strategie: Wenn ein Building nested BuildingParts hat, rendere die Parts direkt.
+    # Wenn ein Building keine nested BuildingParts hat, rendere es direkt.
+    # Top-level BuildingParts (direkte cityObjectMember) werden immer direkt gerendert.
+    # So werden Kaufland/Eishalle vollständig erfasst ohne Phantom-Duplikate.
+    bldg_elements = []
+    for child in root:
+        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        el = None
+        if tag in ("Building", "BuildingPart"):
+            el = child
+        else:
+            for gc in child:
+                gc_tag = gc.tag.split("}")[-1] if "}" in gc.tag else gc.tag
+                if gc_tag in ("Building", "BuildingPart"):
+                    el = gc
+                    break
+        if el is None:
+            continue
+
+        el_tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+        if el_tag == "Building":
+            # Prüfe ob das Building nested BuildingParts enthält
+            nested_parts = el.findall(f".//{{{bldg_ns}}}BuildingPart")
+            if nested_parts:
+                # Building ist nur Container → nested Parts direkt rendern
+                bldg_elements.extend(nested_parts)
+            else:
+                # Building ohne Parts → direkt rendern
+                bldg_elements.append(el)
+        else:
+            # Top-level BuildingPart → direkt rendern
+            bldg_elements.append(el)
+
+    n_buildings      = sum(1 for e in bldg_elements if e.tag.split("}")[-1] == "Building")
+    n_building_parts = sum(1 for e in bldg_elements if e.tag.split("}")[-1] == "BuildingPart")
+    if n_building_parts > 0:
+        print(f"      {Path(filepath).name}: {n_buildings} Building + {n_building_parts} BuildingPart")
+
+    for bldg in bldg_elements:
         gml_id = bldg.get(f"{{{gml_ns}}}id", "?")
 
         # roofType auslesen
@@ -150,6 +188,11 @@ def parse_gml_file(filepath):
                 meas_h = float(mh_el.text)
             except ValueError:
                 pass
+
+        # Jedes Element (Building oder BuildingPart) wird für sich allein geparst.
+        # Da Buildings mit nested Parts bereits durch deren Parts ersetzt wurden,
+        # enthalten die bldg_elements jetzt nur noch Elemente mit eigener Geometrie.
+        # Normales findall ist hier korrekt.
 
         # Alle Polygone sammeln mit ihren mittleren Z-Werten
         all_polys = []   # (mean_z, polygon)
@@ -296,7 +339,12 @@ def load_all_lod2(folder, bbox=None):
 # Gebäude auf Raster brennen
 # ─────────────────────────────────────────────
 
-def rasterize_buildings(buildings, bbox, shape):
+def rasterize_buildings(buildings, bbox, shape, real_min_h=450.0):
+    """
+    real_min_h: minimale Gelaendehoehe der BBox (aus DGM).
+                Wird fuer roof_mc Berechnung verwendet.
+                Muss korrekt uebergeben werden damit Dachoehen stimmen!
+    """
     H, W      = shape
     transform = transform_from_bounds(
         bbox["west"], bbox["south"], bbox["east"], bbox["north"], W, H
@@ -319,8 +367,8 @@ def rasterize_buildings(buildings, bbox, shape):
 
         if poly is None or poly.is_empty or h_m < 1.5:
             continue
-        if poly.area / (px_m ** 2) < 2:
-            poly = poly.buffer(px_m)
+        if poly.area < 9:
+            continue
 
         try:
             burned = rasterize(
@@ -334,7 +382,8 @@ def rasterize_buildings(buildings, bbox, shape):
             heights[where]   = h_m
             roof_type[where] = r_type
             if r_z > 0:
-                roof_mc[where] = max(int(round(r_z - 450.0 + 10)), 10)
+                # Korrekter Offset: r_z (absolut ü.NN) → MC-Y relativ zu real_min_h
+                roof_mc[where] = max(int(round(r_z - real_min_h + 10)), 3)
             n_ok += 1
         except Exception:
             pass

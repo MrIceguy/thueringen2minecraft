@@ -21,6 +21,8 @@ Installation:
 import numpy as np
 from pathlib import Path
 import warnings
+
+CHURCH_POINTS = []  # [(utm_x, utm_y)] — Kirchturm-Standorte aus ATKIS AX_Turm
 warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────
@@ -322,7 +324,7 @@ def load_osm_layers(bbox, osm_file=None, cache_dir=None):
     # ── Gewässer ─────────────────────────────
     gew_dir = atkis_root / "gew"
     if gew_dir.exists():
-        print("  Lade Gewässer (Ilm, Seen)...")
+        print("  Lade Gewässer (Flüsse, Seen)...")
         gdf = _load_geodataframe(gew_dir, bbox)
         if gdf is not None:
             col = _detect_type_column(gdf)
@@ -380,17 +382,30 @@ def load_osm_layers(bbox, osm_file=None, cache_dir=None):
     else:
         print(f"  ⚠  {veg_dir}/ fehlt – Vegetation übersprungen")
 
-    # ── Siedlung (nur Grünflächen) ────────────
+
+    # ── Siedlung (Grünflächen + Türme/Kirchen) ──
     sie_dir = atkis_root / "sie"
     if sie_dir.exists():
-        print("  Lade Siedlungs-Grünflächen (Parks, Friedhöfe)...")
+        print("  Lade Siedlungs-Grünflächen, Türme und Kirchen...")
         gdf = _load_geodataframe(sie_dir, bbox)
         if gdf is not None:
             col = _detect_type_column(gdf)
             n = 0
+            n_turm = 0
+            CHURCH_POINTS.clear()
             for _, row in gdf.iterrows():
                 geom = row.geometry
                 if geom is None or geom.is_empty:
+                    continue
+                objart = str(row.get("OBJART", "")).strip()
+                # AX_Turm (51001) → Kirchturm-Koordinate speichern
+                if objart == "51001":
+                    bwf = str(row.get("BWF", "")).strip()
+                    nam = str(row.get("NAM", "")).strip()
+                    pt  = geom.centroid
+                    print(f"      AX_Turm BWF={bwf} NAM='{nam}' @ E{pt.x:.0f} N{pt.y:.0f}")
+                    CHURCH_POINTS.append((pt.x, pt.y))
+                    n_turm += 1
                     continue
                 cls = _get_class(row.get(col) if col else None, SIEDLUNG_MAP)
                 if cls is None:
@@ -401,7 +416,9 @@ def load_osm_layers(bbox, osm_file=None, cache_dir=None):
                         n += 1
                 except Exception:
                     pass
-            print(f"    {n:,} Siedlungs-Features")
+            print(f"    {n:,} Siedlungs-Features  |  {n_turm} Tuerme/Kirchen (AX_Turm)")
+            for cx, cy in CHURCH_POINTS:
+                print(f"      Kirchturm @ E{cx:.0f} N{cy:.0f}")
 
     print(f"\n  → {len(features):,} ATKIS-Features gesamt")
     return features

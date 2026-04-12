@@ -49,12 +49,15 @@ Thumbs.db
 *.bil
 *.hdr
 
+# tests
+check_atkis.py
+debug_*
+
 # -----------------------------
 # Minecraft Weltordner
 # -----------------------------
-# (damit du nicht versehentlich 500 MB hochlädst)
 world/
-world*/ 
+world*/
 *.mca
 *.dat_old
 
@@ -86,3 +89,5 @@ LoD2/
 atkis/
 output/
 export/
+alkis_gebaeude/
+thuringen2minecraft_output/

@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Thüringen → Minecraft · Kachelauswahl</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/proj4@2.9.0/dist/proj4.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #f5f5f0; color: #1a1a1a; height: 100vh; display: flex; flex-direction: column; }
+
+  header { background: #1a1a1a; color: #fff; padding: 12px 20px;
+           display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
+  header h1 { font-size: 16px; font-weight: 500; letter-spacing: 0.02em; }
+  header .badge { background: #4ade80; color: #052e16; font-size: 11px;
+                  padding: 2px 8px; border-radius: 12px; font-weight: 600; }
+
+  .main { display: flex; flex: 1; overflow: hidden; }
+
+  #map { flex: 1; }
+
+  .sidebar { width: 320px; background: #fff; border-left: 1px solid #e5e5e0;
+             display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0; }
+
+  .sidebar-section { padding: 16px; border-bottom: 1px solid #f0f0ea; }
+  .sidebar-section h3 { font-size: 12px; font-weight: 600; color: #666;
+                         text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 12px; }
+
+  .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat-card { background: #f8f8f4; border-radius: 8px; padding: 10px 12px; }
+  .stat-label { font-size: 11px; color: #888; margin-bottom: 2px; }
+  .stat-value { font-size: 22px; font-weight: 600; color: #1a1a1a; }
+
+  .btn-group { display: flex; gap: 6px; flex-wrap: wrap; }
+  .btn { border: 1px solid #d0d0c8; background: #fff; border-radius: 6px;
+         padding: 6px 12px; font-size: 12px; cursor: pointer; color: #1a1a1a;
+         transition: background 0.1s; }
+  .btn:hover { background: #f5f5f0; }
+  .btn.active { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
+  .btn.danger { border-color: #fca5a5; color: #dc2626; }
+  .btn.danger:hover { background: #fef2f2; }
+  .btn.primary { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
+  .btn.primary:hover { background: #333; }
+
+  .preset-btn { font-size: 11px; padding: 5px 10px; }
+
+  .legend { display: flex; flex-direction: column; gap: 6px; }
+  .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #555; }
+  .legend-swatch { width: 20px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+
+  .output-area { flex: 1; overflow-y: auto; padding: 16px; }
+  .cmd-box { background: #1a1a1a; color: #4ade80; font-family: 'Courier New', monospace;
+              font-size: 11px; border-radius: 8px; padding: 12px; white-space: pre-wrap;
+              line-height: 1.6; margin-top: 8px; }
+  .cmd-box.empty { color: #555; font-style: italic; }
+  .copy-btn { margin-top: 8px; width: 100%; }
+
+  .tile-list { max-height: 120px; overflow-y: auto; font-family: monospace;
+               font-size: 11px; color: #555; line-height: 1.8; }
+
+  footer { background: #f5f5f0; border-top: 1px solid #e5e5e0; padding: 8px 16px;
+           font-size: 11px; color: #888; display: flex; gap: 16px; align-items: center; flex-shrink: 0; }
+
+  #cursor-pos { font-family: monospace; }
+
+  /* Leaflet tile overlay styles */
+  .tile-overlay { stroke-width: 0.5; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Thüringen → Minecraft</h1>
+  <span class="badge">v4 · TIF + LoD2 + ATKIS</span>
+  <span style="margin-left:auto; font-size:12px; color:#aaa;">Klick/Drag zum Auswählen von 1×1 km Kacheln</span>
+</header>
+
+<div class="main">
+  <div id="map"></div>
+
+  <div class="sidebar">
+    <!-- Statistiken -->
+    <div class="sidebar-section">
+      <h3>Auswahl</h3>
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">Kacheln</div>
+          <div class="stat-value" id="st-count">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Fläche km²</div>
+          <div class="stat-value" id="st-area">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">BBox Breite</div>
+          <div class="stat-value" id="st-width">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">BBox Höhe</div>
+          <div class="stat-value" id="st-height">—</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Werkzeuge -->
+    <div class="sidebar-section">
+      <h3>Werkzeuge</h3>
+      <div class="btn-group" style="margin-bottom:8px;">
+        <button class="btn active" id="btn-select" onclick="setMode('select')">+ Auswählen</button>
+        <button class="btn" id="btn-deselect" onclick="setMode('deselect')">− Abwählen</button>
+        <button class="btn danger" onclick="clearAll()">Alle löschen</button>
+      </div>
+      <div class="btn-group">
+        <button class="btn preset-btn" onclick="selectPreset('erfurt')">📍 Erfurt Dom</button>
+        <button class="btn preset-btn" onclick="selectPreset('ilmenau')">📍 Ilmenau</button>
+        <button class="btn preset-btn" onclick="selectPreset('jena')">📍 Jena</button>
+        <button class="btn preset-btn" onclick="selectPreset('gotha')">📍 Gotha</button>
+      </div>
+    </div>
+
+    <!-- Legende -->
+    <div class="sidebar-section">
+      <h3>Legende</h3>
+      <div class="legend">
+        <div class="legend-item">
+          <div class="legend-swatch" style="background:rgba(74,222,128,0.6);border:1.5px solid #16a34a;"></div>
+          Ausgewählt
+        </div>
+        <div class="legend-item">
+          <div class="legend-swatch" style="background:rgba(59,130,246,0.4);border:1px solid #3b82f6;"></div>
+          Bereits generiert (Demo)
+        </div>
+        <div class="legend-item">
+          <div class="legend-swatch" style="background:rgba(200,200,180,0.3);border:1px dashed #aaa;"></div>
+          Verfügbare Kachel
+        </div>
+      </div>
+    </div>
+
+    <!-- Output -->
+    <div class="output-area">
+      <h3 style="font-size:12px;font-weight:600;color:#666;text-transform:uppercase;
+                  letter-spacing:0.08em;margin-bottom:10px;">Befehle</h3>
+
+      <div class="btn-group" style="margin-bottom:8px;">
+        <button class="btn primary" onclick="generateCmds()">Befehle generieren</button>
+        <button class="btn" onclick="copyToClipboard()">Kopieren</button>
+        <button class="btn" id="dl-btn" style="display:none;background:#166534;color:#fff;border-color:#166534;" onclick="startBrowserDownload()">⬇ Browser-Download</button>
+      </div>
+      <div id="dl-info" style="font-size:11px;color:#888;margin-top:6px;"></div>
+
+      <div class="cmd-box empty" id="cmd-output">Wähle Kacheln auf der Karte aus...</div>
+
+      <div style="margin-top:12px;">
+        <div style="font-size:11px;font-weight:600;color:#666;text-transform:uppercase;
+                    letter-spacing:0.08em;margin-bottom:6px;">Ausgewählte Kacheln</div>
+        <div class="tile-list" id="tile-list">—</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <span id="cursor-pos">Maus bewegen für UTM-Koordinaten</span>
+  <span style="margin-left:auto;">
+    Projektion: EPSG:25832 UTM32N · Kachelgröße: 1×1 km (DGM/DOM), 2×2 km (LoD2)
+  </span>
+</footer>
+
+<script>
+// ─── Proj4 Setup ───────────────────────────────────────────────
+proj4.defs("EPSG:25832", "+proj=utm +zone=32 +ellps=GRS80 +datum=ETRS89 +units=m +no_defs");
+
+function latlngToUTM(lat, lng) {
+  return proj4("EPSG:4326", "EPSG:25832", [lng, lat]);
+}
+function utmToLatLng(e, n) {
+  const [lng, lat] = proj4("EPSG:25832", "EPSG:4326", [e, n]);
+  return [lat, lng];
+}
+
+// ─── Leaflet Map ──────────────────────────────────────────────
+const map = L.map('map', { zoomControl: true }).setView([50.9, 11.4], 9);
+
+// Topografische Karte (OpenTopoMap)
+L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+  maxZoom: 17,
+  attribution: '© <a href="https://opentopomap.org">OpenTopoMap</a> ' +
+               '(<a href="https://creativecommons.org/licenses/by-sa/3.0/">CC-BY-SA</a>)'
+}).addTo(map);
+
+// ─── State ────────────────────────────────────────────────────
+let mode = 'select';
+let isDragging = false;
+let draggedTiles = new Set();  // dedup: jede Kachel nur einmal pro Drag
+let selectedTiles = new Map();
+let generatedTiles = new Set([
+  '641_5649','642_5649','641_5648','642_5648',
+  '635_5616','636_5616','635_5615','636_5615',
+  '642_5650','643_5650'
+]);
+
+function tileKey(ex, ny) { return `${ex}_${ny}`; }
+function tileFromUTM(utmE, utmN) {
+  return { ex: Math.floor(utmE / 1000), ny: Math.floor(utmN / 1000) };
+}
+
+// ─── Tile Layer ───────────────────────────────────────────────
+const overlayLayer = L.layerGroup().addTo(map);
+
+function showGeneratedTiles() {
+  generatedTiles.forEach(k => {
+    const [exStr, nyStr] = k.split('_');
+    drawTile(parseInt(exStr), parseInt(nyStr), 'generated');
+  });
+}
+
+function drawTile(ex, ny, type) {
+  const sw = utmToLatLng(ex * 1000, ny * 1000);
+  const ne = utmToLatLng((ex + 1) * 1000, (ny + 1) * 1000);
+  const style = type === 'selected'
+    ? { color: '#16a34a', weight: 1.5, fillColor: '#4ade80', fillOpacity: 0.55 }
+    : { color: '#3b82f6', weight: 1, fillColor: '#93c5fd', fillOpacity: 0.3 };
+  return L.rectangle([sw, ne], style).addTo(overlayLayer);
+}
+
+// ─── Grid Overlay (bei Zoom ≥ 10) ────────────────────────────
+let gridLayer = null;
+
+function updateGrid() {
+  if (map.getZoom() < 10) {
+    if (gridLayer) { gridLayer.remove(); gridLayer = null; }
+    return;
+  }
+  if (gridLayer) gridLayer.remove();
+  const bounds = map.getBounds();
+  const [utmWest]   = latlngToUTM(bounds.getSouth(), bounds.getWest());
+  const [utmEast]   = latlngToUTM(bounds.getSouth(), bounds.getEast());
+  const [,utmSouth] = latlngToUTM(bounds.getSouth(), bounds.getWest());
+  const [,utmNorth] = latlngToUTM(bounds.getNorth(), bounds.getWest());
+  const exStart = Math.floor(utmWest / 1000);
+  const exEnd   = Math.ceil(utmEast / 1000);
+  const nyStart = Math.floor(utmSouth / 1000);
+  const nyEnd   = Math.ceil(utmNorth / 1000);
+  const lines = [];
+  for (let ex = exStart; ex <= exEnd; ex++) {
+    const [lng1,lat1] = proj4("EPSG:25832","EPSG:4326",[ex*1000, nyStart*1000]);
+    const [lng2,lat2] = proj4("EPSG:25832","EPSG:4326",[ex*1000, nyEnd*1000]);
+    lines.push(L.polyline([[lat1,lng1],[lat2,lng2]], { color:'#666', weight:0.4, opacity:0.5 }));
+    if (map.getZoom() >= 12) {
+      const mid = proj4("EPSG:25832","EPSG:4326",[ex*1000+500, (nyStart+nyEnd)/2*1000]);
+      lines.push(L.marker([mid[1],mid[0]], {
+        icon: L.divIcon({ html:`<span style="font:10px monospace;color:#555;white-space:nowrap;">E${ex}</span>`, className:'', iconAnchor:[0,6] })
+      }));
+    }
+  }
+  for (let ny = nyStart; ny <= nyEnd; ny++) {
+    const [lng1,lat1] = proj4("EPSG:25832","EPSG:4326",[exStart*1000, ny*1000]);
+    const [lng2,lat2] = proj4("EPSG:25832","EPSG:4326",[exEnd*1000, ny*1000]);
+    lines.push(L.polyline([[lat1,lng1],[lat2,lng2]], { color:'#666', weight:0.4, opacity:0.5 }));
+  }
+  gridLayer = L.layerGroup(lines).addTo(map);
+}
+map.on('zoomend moveend', updateGrid);
+
+// ─── Tile Interaction ─────────────────────────────────────────
+function toggleTile(latlng) {
+  const [utmE, utmN] = latlngToUTM(latlng.lat, latlng.lng);
+  const { ex, ny } = tileFromUTM(utmE, utmN);
+  const k = tileKey(ex, ny);
+  if (draggedTiles.has(k)) return;   // schon in diesem Drag-Vorgang bearbeitet
+  draggedTiles.add(k);
+  if (mode === 'select') {
+    if (!selectedTiles.has(k)) {
+      selectedTiles.set(k, drawTile(ex, ny, 'selected'));
+    }
+  } else {
+    if (selectedTiles.has(k)) {
+      overlayLayer.removeLayer(selectedTiles.get(k));
+      selectedTiles.delete(k);
+    }
+  }
+  updateStats();
+}
+
+map.on('mousedown', e => {
+  if (e.originalEvent.button !== 0) return;
+  isDragging = true;
+  draggedTiles.clear();
+  toggleTile(e.latlng);
+});
+
+map.on('mousemove', e => {
+  const [utmE, utmN] = latlngToUTM(e.latlng.lat, e.latlng.lng);
+  document.getElementById('cursor-pos').textContent =
+    `UTM32N  E ${Math.round(utmE).toLocaleString()}  N ${Math.round(utmN).toLocaleString()}` +
+    `  |  Kachel E${Math.floor(utmE/1000)} N${Math.floor(utmN/1000)}`;
+  if (isDragging) toggleTile(e.latlng);
+});
+
+map.on('mouseup',    () => { isDragging = false; draggedTiles.clear(); });
+map.on('mouseleave', () => { isDragging = false; draggedTiles.clear(); });
+
+// ─── Presets ──────────────────────────────────────────────────
+const PRESETS = {
+  erfurt:  { tiles: [[641,5649],[642,5649],[641,5648],[642,5648]], zoom: 14, center: [50.977, 11.022] },
+  ilmenau: { tiles: [[635,5616],[636,5616],[635,5615],[636,5615]], zoom: 14, center: [50.685, 10.920] },
+  jena:    { tiles: [[648,5636],[649,5636],[648,5637],[649,5637]], zoom: 13, center: [50.927, 11.589] },
+  gotha:   { tiles: [[619,5637],[620,5637],[619,5638],[620,5638]], zoom: 13, center: [50.949, 10.705] },
+};
+
+function selectPreset(name) {
+  const p = PRESETS[name];
+  p.tiles.forEach(([ex,ny]) => {
+    const k = tileKey(ex,ny);
+    if (!selectedTiles.has(k)) {
+      const rect = drawTile(ex, ny, 'selected');
+      selectedTiles.set(k, rect);
+    }
+  });
+  map.setView(p.center, p.zoom);
+  updateStats();
+}
+
+function clearAll() {
+  selectedTiles.forEach(rect => overlayLayer.removeLayer(rect));
+  selectedTiles.clear();
+  updateStats();
+  document.getElementById('cmd-output').textContent = 'Wähle Kacheln auf der Karte aus...';
+  document.getElementById('cmd-output').className = 'cmd-box empty';
+  document.getElementById('tile-list').textContent = '—';
+}
+
+function setMode(m) {
+  mode = m;
+  document.getElementById('btn-select').classList.toggle('active', m === 'select');
+  document.getElementById('btn-deselect').classList.toggle('active', m === 'deselect');
+  map.getContainer().style.cursor = m === 'select' ? 'crosshair' : 'cell';
+}
+
+// ─── Stats & BBox ─────────────────────────────────────────────
+function getBBox() {
+  if (!selectedTiles.size) return null;
+  let west=Infinity, east=-Infinity, south=Infinity, north=-Infinity;
+  selectedTiles.forEach((_, k) => {
+    const [exStr, nyStr] = k.split('_');
+    const ex = parseInt(exStr), ny = parseInt(nyStr);
+    west  = Math.min(west,  ex * 1000);
+    east  = Math.max(east,  (ex+1) * 1000);
+    south = Math.min(south, ny * 1000);
+    north = Math.max(north, (ny+1) * 1000);
+  });
+  return { west, east, south, north };
+}
+
+function updateStats() {
+  const n = selectedTiles.size;
+  document.getElementById('st-count').textContent = n;
+  document.getElementById('st-area').textContent = n;
+
+  if (n === 0) {
+    document.getElementById('st-width').textContent = '—';
+    document.getElementById('st-height').textContent = '—';
+    document.getElementById('tile-list').textContent = '—';
+    return;
+  }
+
+  const bb = getBBox();
+  document.getElementById('st-width').textContent  = ((bb.east-bb.west)/1000) + ' km';
+  document.getElementById('st-height').textContent = ((bb.north-bb.south)/1000) + ' km';
+
+  const keys = [...selectedTiles.keys()].sort();
+  document.getElementById('tile-list').textContent = keys.join('  ');
+}
+
+// ─── Command Generation ───────────────────────────────────────
+function generateCmds() {
+  if (!selectedTiles.size) { alert('Bitte zuerst Kacheln auswählen.'); return; }
+  const bb = getBBox();
+  const keys = [...selectedTiles.keys()].sort();
+  const lod2Set = new Set(keys.map(k => {
+    const [exStr, nyStr] = k.split('_');
+    const ex = parseInt(exStr), ny = parseInt(nyStr);
+    return `${Math.floor(ex/2)*2}_${Math.floor(ny/2)*2}`;
+  }));
+  const bboxStr = `${bb.west} ${bb.east} ${bb.south} ${bb.north}`;
+  let cmd = `# ${keys.length} DGM/DOM-Kacheln · ${lod2Set.size} LoD2-Kacheln\n`;
+  cmd += `# BBox: W${bb.west} E${bb.east} S${bb.south} N${bb.north}\n\n`;
+  cmd += `# 1. Geodaten herunterladen:\n`;
+  cmd += `python download_geodata.py --bbox ${bboxStr} --download\n\n`;
+  cmd += `# 2. Minecraft-Welt generieren:\n`;
+  cmd += `python thueringen2minecraft.py --bbox ${bboxStr}\n`;
+  const el = document.getElementById('cmd-output');
+  el.textContent = cmd;
+  el.className = 'cmd-box';
+  document.getElementById('dl-btn').style.display = 'inline-block';
+}
+
+function startBrowserDownload() {
+  if (!selectedTiles.size) return;
+  const bb = getBBox();
+  const BASE = 'https://geoportal.geoportal-th.de';
+  const tiles = [...selectedTiles.keys()].sort();
+  // Sammle alle Download-URLs
+  const urls = [];
+  // DGM + DOM (1km Kacheln)
+  const dgmTiles = required1km(bb);
+  dgmTiles.forEach(([e,n]) => {
+    urls.push(`${BASE}/hoehendaten/DGM/dgm_2020-2025/dgm1_32_${e}_${n}_1_th_2020-2025.zip`);
+    urls.push(`${BASE}/hoehendaten/DOM/dom_2020-2025/dom1_32_${e}_${n}_1_th_2020-2025.zip`);
+  });
+  // LoD2 (2km Kacheln)
+  const lod2Set = new Set();
+  dgmTiles.forEach(([e,n]) => {
+    lod2Set.add(`${Math.floor(e/2)*2}_${Math.floor(n/2)*2}`);
+  });
+  lod2Set.forEach(k => {
+    const [e,n] = k.split('_');
+    urls.push(`${BASE}/LoD2/LoD2_32_${e}_${n}_2_TH.zip`);
+  });
+  const info = document.getElementById('dl-info');
+  info.textContent = `${urls.length} Dateien werden heruntergeladen...`;
+  // Downloads mit kurzer Verzögerung starten
+  urls.forEach((url, i) => {
+    setTimeout(() => {
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = url.split('/').pop();
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }, i * 800);
+  });
+}
+
+function required1km(bb) {
+  const tiles = [];
+  for (let e = Math.floor(bb.west/1000); e <= Math.floor((bb.east-1)/1000); e++)
+    for (let n = Math.floor(bb.south/1000); n <= Math.floor((bb.north-1)/1000); n++)
+      tiles.push([e, n]);
+  return tiles;
+}
+
+function copyToClipboard() {
+  const txt = document.getElementById('cmd-output').textContent;
+  if (txt && txt !== 'Wähle Kacheln auf der Karte aus...') {
+    navigator.clipboard.writeText(txt).then(() => {
+      const btn = event.target;
+      btn.textContent = '✓ Kopiert!';
+      setTimeout(() => btn.textContent = 'Kopieren', 1500);
+    });
+  }
+}
+
+// ─── Init ─────────────────────────────────────────────────────
+showGeneratedTiles();
+updateGrid();
+map.getContainer().style.cursor = 'crosshair';
+
+// Thüringen-Umriss als Referenz (vereinfacht)
+const thBorder = [
+  [50.205, 9.878],[50.462, 9.922],[50.648, 10.175],[50.861, 10.054],
+  [51.143, 10.225],[51.409, 10.407],[51.623, 11.055],[51.637, 11.664],
+  [51.498, 12.225],[51.093, 12.654],[50.795, 12.654],[50.493, 12.270],
+  [50.343, 11.862],[50.173, 11.662],[50.173, 11.050],[50.205, 10.440],
+  [50.205, 9.878]
+];
+L.polyline(thBorder, { color: '#1a1a1a', weight: 2, opacity: 0.4, dashArray: '4 4' })
+  .addTo(map)
+  .bindTooltip('Thüringen (ca.)', { permanent: false });
+</script>
+</body>
+</html>

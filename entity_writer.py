@@ -383,12 +383,13 @@ def populate_city(writer_blocks, entity_writer,
             entity_writer.spawn_villager(int(sc), comp_floor_y + 1, int(sr))
             n_villagers += 1
 
-        # Treppenhaus
+        # Treppenhäuser: alle ~50px ein neues, bevorzugt an Türen
         if n_stories >= 2:
             deep = _be(comp_interior, structure=struct, border_value=0) & comp
             deep_arr = np.argwhere(deep) if deep.any() else interior_pixels
 
-            stair_found = False
+            # Kandidaten-Positionen sammeln
+            stair_candidates = []
             rows_available = sorted(set(int(p[0]) for p in deep_arr))
             for row_r in rows_available:
                 if row_r + 1 not in rows_available:
@@ -398,48 +399,47 @@ def populate_city(writer_blocks, entity_writer,
                 common = sorted(set(cols_r0) & set(cols_r1))
                 for i in range(len(common) - 3):
                     if common[i+3] - common[i] == 3:
-                        stair_r = row_r
-                        stair_c = common[i]
-                        stair_found = True
-                        break
-                if stair_found:
-                    break
+                        stair_candidates.append((row_r, common[i]))
 
-            if stair_found:
+            # Treppenhäuser alle 50px platzieren
+            placed_stairs = []  # (r, c) schon gesetzt
+            for stair_r, stair_c in stair_candidates:
+                # Mindestabstand 50px zu schon gesetzten Treppenhäusern
+                too_close = any(abs(stair_r - pr) + abs(stair_c - pc) < 50
+                                for pr, pc in placed_stairs)
+                if too_close:
+                    continue
+                placed_stairs.append((stair_r, stair_c))
+
                 for story in range(n_stories - 1):
                     y_lower = comp_floor_y + story * STORY_H
                     y_upper = comp_floor_y + (story + 1) * STORY_H
                     row = stair_r + (story % 2)
                     going_east = (story % 2 == 0)
                     facing     = "east" if going_east else "west"
-                    facing_dec = "west" if going_east else "east"  # dekorativ = umgekehrt
+                    facing_dec = "west" if going_east else "east"
 
-                    top_tc = None  # Spalte der obersten Stufe (darf nicht gelöscht werden)
-
+                    top_tc = None
                     for step in range(STORY_H):
                         tc = stair_c + step if going_east else stair_c + STORY_H - 1 - step
                         sy = y_lower + 1 + step
                         if not (0 <= tc < dgm_shape[1]): continue
                         if step == STORY_H - 1:
-                            top_tc = tc  # merken
-
-                        # Dekorative umgekehrte Stufe darunter (nur ab Stufe 2)
+                            top_tc = tc
                         if step >= 1:
                             writer_blocks.delete_block(tc, sy - 1, row)
                             writer_blocks.set_block(tc, sy - 1, row,
                                 f"minecraft:oak_stairs[facing={facing_dec},half=top,shape=straight]")
-                        # Hauptstufe
                         writer_blocks.delete_block(tc, sy, row)
                         writer_blocks.set_block(tc, sy, row,
                             f"minecraft:oak_stairs[facing={facing},half=bottom,shape=straight]")
-                        # Kopffreiheit
                         for dy in [1, 2, 3]:
                             writer_blocks.delete_block(tc, sy + dy, row)
+                        stair_zone.add((row, tc))
 
-                    # Boden im nächsten Stockwerk löschen — NICHT die oberste Stufe
                     for tc in range(stair_c, stair_c + STORY_H):
                         if tc == top_tc:
-                            continue  # oberste Stufe nicht löschen
+                            continue
                         writer_blocks.delete_block(tc, y_upper,     row)
                         writer_blocks.delete_block(tc, y_upper + 1, row)
                         writer_blocks.delete_block(tc, y_upper + 2, row)
@@ -449,11 +449,18 @@ def populate_city(writer_blocks, entity_writer,
             for story in range(n_stories):
                 floor_above = comp_floor_y + (story + 1) * STORY_H
                 lamp_y = floor_above - 1
-                if floor_above >= roof_y or lamp_y <= comp_floor_y:
+                if floor_above > roof_y or lamp_y <= comp_floor_y:
                     break  # kein echter Boden darüber
                 for ip_r, ip_c in interior_pixels:
-                    if (int(ip_r) * 3 + int(ip_c) * 5) % 64 == 0:
-                        writer_blocks.set_block(int(ip_c), lamp_y, int(ip_r),
+                    ir, ic = int(ip_r), int(ip_c)
+                    # Kein Spawn im Treppenhaus
+                    if (ir, ic) in stair_zone:
+                        continue
+                    px_roof = int(lod2_roof_mc[ir, ic])
+                    if px_roof < floor_above + 1:
+                        continue
+                    if (ir * 3 + ic * 5) % 64 == 0:
+                        writer_blocks.set_block(ic, lamp_y, ir,
                             "minecraft:lantern[hanging=true]")
 
     print(f"  Filter: ok={n_ok} dim={n_skip_dim} height={n_skip_height} area={n_skip_area} interior={n_skip_interior}")
