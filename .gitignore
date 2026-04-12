@@ -91,3 +91,6 @@ output/
 export/
 alkis_gebaeude/
 thuringen2minecraft_output/
+
+# docs/ erlauben
+!docs/*.png
