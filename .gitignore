@@ -52,7 +52,7 @@ Thumbs.db
 # tests
 check_atkis.py
 debug_*
-
+check*
 # -----------------------------
 # Minecraft Weltordner
 # -----------------------------

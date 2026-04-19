@@ -35,6 +35,7 @@ from lod2_loader import (
 from atkis_layer import (
     load_osm_layers, burn_osm_to_raster,
     get_osm_block, is_water, print_osm_stats, OSM_CLASSES, CHURCH_POINTS,
+    load_ortslage_polygons,
 )
 
 # ─────────────────────────────────────────────
@@ -296,7 +297,8 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
                           osm_raster, lod2_mask, lod2_heights,
                           lod2_roof_mc, lod2_roof_type,
                           dgm_ox=0, dgm_oy=0, dgm_res=1.0,
-                          buildings=None, alkis_buildings=None):
+                          buildings=None, alkis_buildings=None,
+                          bridge_mask=None, ortslage_mask=None):
     from anvil_writer import WorldWriter, write_level_dat
     from scipy.ndimage import maximum_filter, binary_erosion, distance_transform_edt, label as ndlabel
 
@@ -309,7 +311,15 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
 
     print("  Berechne glatte Gebaeude-Basis...")
     mc_y_grid   = height_to_mc_y(dgm)
-    smooth_base = maximum_filter(mc_y_grid, size=3, mode='nearest')  # fuer Dach
+    from scipy.ndimage import maximum_filter as _mxf
+    road_mask_r = (osm_raster >= 10) & (osm_raster <= 20)
+    road_y_grid = mc_y_grid.copy().astype(np.int32)
+    if bridge_mask is not None and bridge_mask.any():
+        # Nur Brückenpixel: max Straßenhöhe aus Umgebung (überspringt das Tal)
+        road_y_map = np.where(road_mask_r & ~bridge_mask, mc_y_grid, 0).astype(np.int32)
+        road_y_max = _mxf(road_y_map, size=31)
+        road_y_grid[bridge_mask] = road_y_max[bridge_mask]
+    smooth_base = _mxf(mc_y_grid, size=3, mode='nearest')  # fuer Dach
 
     # Boden pro Gebaeude: Median der Terrain-Y-Werte aller Pixel des Gebaeudes
     # → gleichmaessiger Boden, passt zum Terrain, kein Unterfliessen
@@ -484,6 +494,8 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
                 continue
 
             sy      = int(mc_y_grid[row, col])
+            if bridge_mask is not None and bridge_mask[row, col]:
+                sy = int(road_y_grid[row, col]) - 1  # Brücke: 1 Block unter Straßenniveau
             osm_val = int(osm_raster[row, col])
             bx, bz  = col, row
 
@@ -604,16 +616,16 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
                     else:
                         writer.set_block(bx, sy, bz, osm_block)
 
-                # Baeume auf Wald/Gruenland — nicht auf Ackerland (33), nicht nah an Gebaeuden
+                # Bäume nur auf Wald (31) und Wiese (30)
                 if osm_val in (30, 31):
                     h = float(ndsm[row, col])
                     if h < 4.0:
-                        h = 7.0 if osm_val == 31 else 5.0  # Wald=7m, Wiese=5m
+                        h = 7.0 if osm_val == 31 else 5.0
                     ndsm_cls_val = int(ndsm_classes[row, col])
                     if h > 2.0 and not building_bool[row, col] and ndsm_cls_val != 1:
                         near_building = building_bool[
-                            max(0,row-8):min(H,row+9),   # 8px Abstand statt 4
-                            max(0,col-8):min(W,col+9)
+                            max(0,row-12):min(H,row+13),
+                            max(0,col-12):min(W,col+13)
                         ].any()
                         if not near_building:
                             seed = (row * 7 + col * 13) % 10
@@ -632,7 +644,8 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
                 # Deko auch auf ATKIS-Flaechen
                 _place_decoration(writer, bx, bz, sy, row, col,
                                   osm_val, osm_raster, lod2_mask, H, W,
-                                  bldg_top_raster=bldg_top_raster)
+                                  bldg_top_raster=bldg_top_raster,
+                                  in_ortslage=ortslage_mask[row, col] if ortslage_mask is not None else True)
 
             elif osm_val > 0 and is_water(osm_val):
                 # Unterirdischen Fluss erkennen: echter Fluss liegt im DGM-Tiefpunkt
@@ -649,10 +662,10 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
                     is_valley = True
 
                 if is_valley:
-                    # Echter Fluss: 1 Block ueber Terrain-Niveau
+                    # Echter Fluss: fließendes Wasser (level=7 = fließt, breitet sich nicht aus)
                     writer.set_block(bx, sy - 1, bz, "minecraft:gravel")
-                    writer.set_block(bx, sy,     bz, "minecraft:water")
-                    writer.set_block(bx, sy + 1, bz, "minecraft:water")
+                    writer.set_block(bx, sy,     bz, "minecraft:water[level=7]")
+                    writer.set_block(bx, sy + 1, bz, "minecraft:water[level=7]")
                 else:
                     # Unterirdischer Abschnitt: Boden rendern (Gras oder was osm sagt)
                     writer.set_block(bx, sy, bz, "minecraft:grass_block")
@@ -674,7 +687,8 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
                 # Dekoration
                 _place_decoration(writer, bx, bz, sy, row, col,
                                   osm_val, osm_raster, lod2_mask, H, W,
-                                  bldg_top_raster=bldg_top_raster)
+                                  bldg_top_raster=bldg_top_raster,
+                                  in_ortslage=ortslage_mask[row, col] if ortslage_mask is not None else True)
 
     # Wandverlaengerung erfolgt jetzt direkt in _place_building_pixel via extended_top
     # Separater Pass: Lücken zwischen verschieden hohen Gebäudeteilen schließen.
@@ -778,13 +792,14 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
 
 def _place_decoration(writer, bx, bz, sy, row, col,
                       osm_val, osm_raster, lod2_mask, H, W,
-                      bldg_top_raster=None):
+                      bldg_top_raster=None, in_ortslage=True):
     seed  = (row * 17 + col * 31) % 100
     seed2 = (row * 53 + col * 7)  % 10
 
-    # Keine Deko auf Strassen/Wegen/Bahn (ATKIS-Codes 10-20)
-    if 10 <= osm_val <= 20:
-        if seed == 0:  # Laterne alle ~100m – aber NUR am Rand, nicht neben/unter Gebaeuden
+    # Keine Deko auf Strassen/Wegen/Bahn (10-20) oder Schotter/Acker (32-33, 35-36)
+    if 10 <= osm_val <= 20 or osm_val in (32, 35, 36):
+        # Laternen NUR auf echten Straßen innerhalb Ortslage
+        if osm_val in (10, 11, 12, 13, 14) and seed == 0 and in_ortslage:
             is_road_edge = any(
                 not (10 <= int(osm_raster[row + dr, col + dc]) <= 20)
                 for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)]
@@ -810,14 +825,16 @@ def _place_decoration(writer, bx, bz, sy, row, col,
                 if 0 <= row+dr < H and 0 <= col+dc < W
             )
             if is_road_edge and not near_lod2 and not inside_building and not near_door:
-                writer.set_block(bx, sy + 1, bz, "minecraft:oak_fence")
-                writer.set_block(bx, sy + 2, bz, "minecraft:lantern")
+                for _dy in range(1, 6):
+                    writer.set_block(bx, sy + _dy, bz, "minecraft:end_rod[facing=up]")
+                writer.set_block(bx, sy + 6, bz, "minecraft:lantern[hanging=false]")
         return
 
     near_building = lod2_mask[
         max(0,row-3):min(H,row+4),
         max(0,col-3):min(W,col+4)
     ].any()
+
 
     FLOWERS = [
         "minecraft:dandelion", "minecraft:poppy",
@@ -855,20 +872,22 @@ def _place_decoration(writer, bx, bz, sy, row, col,
                     writer.set_block(bx, sy + 2, bz, "minecraft:sugar_cane")
                 return
 
-    # Laternen auf Hauptstrassen alle ~12m – nur am Rand, nicht neben Gebaeuden
-    if osm_val in (11, 12, 13) and seed == 0:
-        is_road_edge = any(
-            not (10 <= int(osm_raster[row + dr, col + dc]) <= 20)
-            for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)]
-            if 0 <= row+dr < H and 0 <= col+dc < W
-        )
+    # Laternen auf Hauptstrassen alle ~12m – nur im Ortslage-Bereich
+    if osm_val in (11, 12, 13) and seed == 0 and in_ortslage:
+        neighbors = [(row+dr, col+dc) for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)]
+                     if 0 <= row+dr < H and 0 <= col+dc < W]
+        road_neighbors = sum(1 for r2,c2 in neighbors if 10 <= int(osm_raster[r2, c2]) <= 20)
+        if road_neighbors < 3:  # mind. 3 Straßen-Nachbarn → echter Straßenrand
+            return
+        is_road_edge = any(not (10 <= int(osm_raster[r2, c2]) <= 20) for r2,c2 in neighbors)
         near_lod2 = lod2_mask[
             max(0,row-3):min(H,row+4),
             max(0,col-3):min(W,col+4)
         ].any()
         if is_road_edge and not near_lod2:
-            writer.set_block(bx, sy + 1, bz, "minecraft:oak_fence")
-            writer.set_block(bx, sy + 2, bz, "minecraft:lantern")
+            for _dy in range(1, 6):
+                writer.set_block(bx, sy + _dy, bz, "minecraft:end_rod[facing=up]")
+            writer.set_block(bx, sy + 6, bz, "minecraft:lantern[hanging=false]")
 
 
 def _is_corner_wall(row, col, wall_mask, building_bool, H, W):
@@ -1215,20 +1234,46 @@ def main():
         features   = load_osm_layers(actual_bbox)
         osm_raster = burn_osm_to_raster(features, actual_bbox, dgm.shape)
 
+        # Ortslage-Maske: Laternen nur innerhalb AX_Ortslage
+        ortslage_polys = load_ortslage_polygons(actual_bbox)
+        ortslage_mask = np.zeros(dgm.shape, dtype=bool)
+        if ortslage_polys:
+            from rasterio.features import rasterize as _rasterize
+            from rasterio.transform import from_bounds as _from_bounds
+            _transform = _from_bounds(actual_bbox["west"], actual_bbox["south"],
+                                      actual_bbox["east"], actual_bbox["north"],
+                                      dgm.shape[1], dgm.shape[0])
+            _burned = _rasterize([(g, 1) for g in ortslage_polys],
+                                  out_shape=dgm.shape, transform=_transform,
+                                  fill=0, dtype=np.uint8)
+            ortslage_mask = _burned > 0
+            print(f"  Ortslage-Maske: {int(ortslage_mask.sum()):,} px")
+
         # Wasser-Pixel unter LoD2-Gebaeuden entfernen + minimale Dilation
         # ATKIS-Daten ueberschneiden sich geometrisch nicht mit Strassen,
         # daher nur 3px Puffer fuer Rasterisierungs-Ungenauigkeiten.
-        from scipy.ndimage import binary_dilation as _bdil
+        from scipy.ndimage import binary_dilation as _bdil, maximum_filter as _mxf2
         road_mask    = (osm_raster >= 10) & (osm_raster <= 20)
         water_mask   = np.isin(osm_raster, [1, 2])
         bldg_mask_2d = lod2_mask == 1
+        bridge_mask  = np.zeros(osm_raster.shape, dtype=bool)
         if water_mask.any():
-            near_road   = _bdil(road_mask, iterations=3)
-            remove_mask = water_mask & (near_road | bldg_mask_2d)
-            n_cleared   = int(remove_mask.sum())
+            road_dilated_mask = _bdil(road_mask, iterations=4)
+            cross_mask = water_mask & road_dilated_mask
+            if cross_mask.any():
+                # Lücken nur DIREKT an cross_mask-Pixeln — nicht das ganze Dreieck
+                near_cross = _bdil(cross_mask, iterations=2)
+                road_gap_mask = near_cross & ~road_mask & ~water_mask & ~cross_mask
+                road_val_map = np.where(road_mask, osm_raster, 0).astype(np.int32)
+                road_dilated_vals = _mxf2(road_val_map, size=9)
+                fill_mask = cross_mask | road_gap_mask
+                osm_raster[fill_mask] = road_dilated_vals[fill_mask]
+                bridge_mask |= fill_mask
+                print(f"  Straße über Fluss: {int(cross_mask.sum())} px Wasser, {int(road_gap_mask.sum())} px Lücken")
+            remove_mask = water_mask & bldg_mask_2d
             osm_raster[remove_mask] = 0
-            if n_cleared:
-                print(f"  Wasser an Strassen/Gebaeuden entfernt: {n_cleared:,} px")
+            if remove_mask.any():
+                print(f"  Wasser an Gebaeuden entfernt: {int(remove_mask.sum())} px")
 
         # Kleine, flache LoD2-Gebaeude (< 4m) die auf Wasser-Pixeln liegen
         # sind Infrastrukturbauten (Pumpwerke, Schaechte) entlang des Flusses.
@@ -1256,7 +1301,9 @@ def main():
                           lod2_roof_mc, lod2_roof_type,
                           dgm_ox=dgm_ox, dgm_oy=dgm_oy, dgm_res=dgm_res,
                           buildings=buildings,
-                          alkis_buildings=alkis_buildings)
+                          alkis_buildings=alkis_buildings,
+                          bridge_mask=bridge_mask,
+                          ortslage_mask=ortslage_mask)
 
     print("\n✓ Fertig! 🎮")
 

@@ -282,17 +282,28 @@ def parse_gml_file(filepath):
 # ─────────────────────────────────────────────
 
 def load_all_lod2(folder, bbox=None):
-    """
-    Lädt alle .gml-Dateien aus `folder`.
-
-    Returns:
-        Liste aller Gebäude (dicts, siehe parse_gml_file)
-    """
     folder    = Path(folder)
     gml_files = sorted(set(folder.glob("*.gml")) | set(folder.glob("*.GML")))
 
     if not gml_files:
         raise FileNotFoundError(f"Keine .gml-Dateien in '{folder}/'")
+
+    # Dateiname-Filter: nur Kacheln die die BBox berühren vorladen
+    # LoD2_32_{e_km}_{n_km}_2_TH.gml — Kachel = [e_km*1000, (e_km+2)*1000] × [n_km*1000, (n_km+2)*1000]
+    if bbox:
+        import re
+        filtered = []
+        for f in gml_files:
+            m = re.search(r"_32_(\d+)_(\d+)_", f.name)
+            if m:
+                e_km, n_km = int(m.group(1)), int(m.group(2))
+                # Kachel-BBox: 2x2 km
+                if (e_km * 1000 < bbox["east"]  and (e_km + 2) * 1000 > bbox["west"] and
+                    n_km * 1000 < bbox["north"] and (n_km + 2) * 1000 > bbox["south"]):
+                    filtered.append(f)
+            else:
+                filtered.append(f)  # kein Koordinatenmuster → sicherheitshalber laden
+        gml_files = filtered
 
     print(f"  {len(gml_files)} GML-Datei(en):")
     for f in gml_files:

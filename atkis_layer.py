@@ -38,13 +38,15 @@ OSM_CLASSES = {
     13: ("minecraft:stone_slab",           4,   5, "Gemeindestraße"),
     14: ("minecraft:stone_bricks",         3,   4, "Wohnstraße"),
     15: ("minecraft:cobblestone",          2,   3, "Feldweg / Wirtschaftsweg"),
-    16: ("minecraft:dirt_path",            2,   2, "Fußweg / Pfad"),
+    16: ("minecraft:dirt_path",            2,   3, "Fußweg / Pfad"),
     17: ("minecraft:oak_planks",           3,   3, "Radweg"),
     20: ("minecraft:rail",                 2,   6, "Bahnstrecke"),
     30: ("minecraft:grass_block",          0,   1, "Grünland / Wiese"),
     31: ("minecraft:moss_block",           0,   1, "Wald"),
     32: ("minecraft:sand",                 0,   2, "Sandfläche"),
-    33: ("minecraft:dirt",                 0,   1, "Ackerland"),  # keine Bäume
+    33: ("minecraft:grass_block",          0,   2, "Ackerland"),   # Prio 2, keine Bäume
+    34: ("minecraft:grass_block",          0,   2, "Landwirtschaft"),  # Prio 2, keine Bäume
+    35: ("minecraft:gravel",               0,   5, "Schotter / Verkehrsfläche"),
 }
 
 def get_osm_block(osm_value):
@@ -76,19 +78,20 @@ VERKEHR_MAP = {
     "AX_Landesstrasse":             11,
     "AX_Kreisstrasse":              12,
     "AX_Gemeindestrasse":           13,
-    "AX_Strassenverkehr":           14,   # allg. Straßenfläche
+    "AX_Strassenverkehr":           35,   # Straßenverkehrsfläche → Schotter
+    "AX_Platz":                     35,   # Platz → Schotter
     "AX_Weg":                       15,
     "AX_FussWandRadweg":            16,
     "AX_Bahnstrecke":               20,
     "AX_Seilbahn":                  20,
     # numerische OAK-Codes (kommen je nach Exportformat vor)
-    "42001": 10,  # Autobahn
-    "42003": 10,  # Bundesstraße
-    "42005": 11,  # Landesstraße / Staatsstraße
+    "42001": 35,  # AX_Strassenverkehr (Fläche) → Schotter
+    "42003": 10,  # Bundesstraße (Linie)
+    "42005": 11,  # Landesstraße
     "42006": 12,  # Kreisstraße
     "42007": 13,  # Gemeindestraße
-    "42008": 14,  # Wirtschaftsweg klassifiziert
-    "42009": 15,  # Wirtschaftsweg
+    "42008": 14,  # Wirtschaftsweg
+    "42009": 35,  # AX_Platz → Schotter
     "42010": 15,  # Weg
     "42015": 16,  # Fußweg
     "42016": 17,  # Radweg
@@ -126,34 +129,46 @@ GEWAESSER_BREITE = {
 
 # Vegetation (veg)
 VEGETATION_MAP = {
-    "AX_Wald":              31,
-    "AX_Gehoelz":          31,
-    "AX_Heide":             30,
-    "AX_Moor":              30,
-    "AX_Sumpf":             30,
-    "AX_Landwirtschaft":    30,
-    "AX_Grünland":          30,
-    "AX_Ackerland":         33,
-    "43001": 31,  # Wald
-    "43002": 31,  # Gehölz
-    "43003": 30,  # Heide
-    "43004": 30,  # Moor
-    "43005": 30,  # Sumpf
-    "43006": 30,  # Grünland
-    "41001": 33,  # Ackerland — keine Bäume
-    "41002": 30,  # Gartenland
-    "41003": 30,  # Obstplantage
+    # OBJART_TXT (Fallback)
+    "AX_Wald":              31,   # Wald → moss_block
+    "AX_Gehoelz":          30,   # Gehölz/Gebüsch → grass_block
+    "AX_Heide":             30,   # Heide → grass_block
+    "AX_Moor":              30,   # Moor → grass_block
+    "AX_Sumpf":             30,   # Sumpf → grass_block
+    "AX_Landwirtschaft":    34,   # Landwirtschaft → grass_block, keine Bäume
+    "AX_Grünland":          30,   # Grünland → grass_block
+    "AX_Ackerland":         33,   # Ackerland → dirt
+    "AX_UnlandVegetationsloseFlaeche": 32,  # Ödland → sand
+    # Echte OBJART-Codes aus veg-Shapefiles
+    "43001": 34,  # AX_Landwirtschaft → grass_block, keine Bäume
+    "43002": 31,  # AX_Wald → moss_block, Bäume
+    "43003": 30,  # AX_Gehoelz/Gebüsch → grass_block
+    "43004": 30,  # AX_Heide → grass_block
+    "43005": 30,  # AX_Moor → grass_block
+    "43006": 30,  # AX_Sumpf → grass_block
+    "43007": 32,  # AX_UnlandVegetationsloseFlaeche → sand
+    # alte ATKIS-Codes (Fallback)
+    "41001": 33,  # Ackerland → dirt
+    "41002": 30,  # Gartenland → grass_block
+    "41003": 30,  # Obstplantage → grass_block
 }
 
 # Siedlung (sie) – nur Grünflächen, Friedhöfe etc. (Gebäude kommen aus LoD2)
 SIEDLUNG_MAP = {
     "AX_SportFreizeitUndErholungsflaeche": 30,
-    "AX_Friedhof":      30,
-    "AX_Grünanlage":    30,
+    "AX_Friedhof":                         30,
+    "AX_Grünanlage":                       30,
+    "AX_FlaecheGemischterNutzung":         35,  # Mischnutzung → Schotter
+    "AX_Wohnbauflaeche":                   30,  # Wohnbaufläche → Wiese
+    "AX_IndustrieUndGewerbeflaeche":       35,  # Gewerbe → Schotter
+    "AX_FlaecheBesondererFunktionalerPraegung": 35,
     "41008": 30,  # Sport-/Freizeitanlage
     "41009": 30,  # Campingplatz
     "41010": 30,  # Friedhof
-    "41006": 30,  # Grünanlage / Park
+    "41006": 35,  # Gemischte Fläche → Schotter
+    "41007": 35,  # Besondere Prägung → Schotter
+    "41001": 30,  # Wohnbau → Wiese
+    "41002": 35,  # Gewerbe → Schotter
 }
 
 
@@ -270,6 +285,27 @@ def _get_class(val, mapping):
 # Hauptfunktion: ATKIS → Features
 # ─────────────────────────────────────────────
 
+def load_ortslage_polygons(bbox):
+    """Gibt Shapely-Polygone der AX_Ortslage zurück (für Laternen-Filter)."""
+    import geopandas as gpd
+    from shapely.geometry import box as shapely_box
+    sie_dir = Path("atkis") / "sie"
+    if not sie_dir.exists():
+        return []
+    gdf = _load_geodataframe(sie_dir, bbox)
+    if gdf is None:
+        return []
+    col = _detect_type_column(gdf)
+    polys = []
+    for _, row in gdf.iterrows():
+        objart = str(row.get("OBJART", "")).strip()
+        if objart == "52001":  # AX_Ortslage
+            geom = row.geometry
+            if geom and not geom.is_empty:
+                polys.append(geom)
+    return polys
+
+
 def load_osm_layers(bbox, osm_file=None, cache_dir=None):
     """
     Kompatible Schnittstelle zu osm_layer.py.
@@ -368,9 +404,18 @@ def load_osm_layers(bbox, osm_file=None, cache_dir=None):
                 geom = row.geometry
                 if geom is None or geom.is_empty:
                     continue
-                cls = _get_class(row.get(col) if col else None, VEGETATION_MAP)
+                objart = str(row.get("OBJART", "")).strip()
+                # AX_Landwirtschaft: VEG-Feld für AL/GL-Unterscheidung nutzen
+                if objart == "43001":
+                    veg = str(row.get("VEG", "")).strip()
+                    if veg in ("1020", "1021", "1022"):  # Ackerland
+                        cls = 33  # dirt, keine Bäume
+                    else:  # 1010=Grünland, 1030=Garten, 1050=Streuobst, sonstige
+                        cls = 34  # grass_block, keine Bäume
+                else:
+                    cls = _get_class(row.get(col) if col else None, VEGETATION_MAP)
                 if cls is None:
-                    continue   # unbekannte Vegetationsart ignorieren
+                    continue
                 try:
                     if geom.is_valid:
                         features.append((geom, cls, OSM_CLASSES[cls][2]))
