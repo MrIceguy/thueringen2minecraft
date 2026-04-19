@@ -641,6 +641,24 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
                                         ttype = "birch"
                                     tree_queue.append((bx, bz, sy, h, ttype))
 
+                # nDSM-Baeume auf gruenen ATKIS-Flaechen (nicht 30/31/37 — die haben eigene Logik)
+                # Nicht auf Strassen (10-20), nicht auf Schotter (35/36)
+                if osm_val not in (30, 31, 37) and not (10 <= osm_val <= 20) and osm_val not in (35, 36):
+                    if int(ndsm_classes[row, col]) == 2 and float(ndsm[row, col]) > 3.0:
+                        near_bldg = building_bool[
+                            max(0,row-12):min(H,row+13),
+                            max(0,col-12):min(W,col+13)
+                        ].any()
+                        if not near_bldg:
+                            seed_t = _rhash(row + 5, col + 3) % 10
+                            if seed_t < 5:
+                                too_close = any(
+                                    abs(tx - col) <= 5 and abs(tz - row) <= 5
+                                    for tx, tz, *_ in tree_queue[-200:]
+                                )
+                                if not too_close:
+                                    tree_queue.append((bx, bz, sy, float(ndsm[row, col]), "oak"))
+
                 # Deko auch auf ATKIS-Flaechen
                 _place_decoration(writer, bx, bz, sy, row, col,
                                   osm_val, osm_raster, lod2_mask, H, W,
@@ -678,11 +696,20 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
                 writer.set_block(bx, sy, bz, surf)
 
                 h = float(ndsm[row, col])
-                # Kein Baum auf nDSM-erkannten Gebaeuden (z.B. Gebaeude ohne LoD2-Daten)
-                if h > 2.0 and int(ndsm_classes[row, col]) != 1:
-                    seed = (row * 5 + col * 19) % 10
-                    if seed < 3:
-                        tree_queue.append((bx, bz, sy, h, None))
+                if h > 2.0 and int(ndsm_classes[row, col]) == 2:
+                    near_bldg = building_bool[
+                        max(0,row-12):min(H,row+13),
+                        max(0,col-12):min(W,col+13)
+                    ].any()
+                    if not near_bldg:
+                        seed_t = _rhash(row + 9, col + 2) % 10
+                        if seed_t < 3:
+                            too_close = any(
+                                abs(tx - col) <= 5 and abs(tz - row) <= 5
+                                for tx, tz, *_ in tree_queue[-200:]
+                            )
+                            if not too_close:
+                                tree_queue.append((bx, bz, sy, h, None))
 
                 # Dekoration
                 _place_decoration(writer, bx, bz, sy, row, col,
@@ -790,11 +817,19 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
     print("    → %AppData%\\.minecraft\\saves\\  (Windows)")
 
 
+def _rhash(a, b):
+    h = ((a * 374761393) ^ (b * 668265263)) & 0xFFFFFFFF
+    h ^= h >> 13
+    h  = (h * 1274126177) & 0xFFFFFFFF
+    h ^= h >> 16
+    return h
+
+
 def _place_decoration(writer, bx, bz, sy, row, col,
                       osm_val, osm_raster, lod2_mask, H, W,
                       bldg_top_raster=None, in_ortslage=True):
-    seed  = (row * 17 + col * 31) % 100
-    seed2 = (row * 53 + col * 7)  % 10
+    seed  = _rhash(row, col) % 100
+    seed2 = _rhash(col + 1000, row) % 10
 
     # Keine Deko auf Strassen/Wegen/Bahn (10-20) oder Schotter/Acker (32-33, 35-36)
     if 10 <= osm_val <= 20 or osm_val in (32, 35, 36):
