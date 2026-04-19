@@ -46,7 +46,9 @@ OSM_CLASSES = {
     32: ("minecraft:sand",                 0,   2, "Sandfläche"),
     33: ("minecraft:grass_block",          0,   2, "Ackerland"),   # Prio 2, keine Bäume
     34: ("minecraft:grass_block",          0,   2, "Landwirtschaft"),  # Prio 2, keine Bäume
-    35: ("minecraft:gravel",               0,   5, "Schotter / Verkehrsfläche"),
+    35: ("minecraft:gravel",               0,   5, "Gewerbe / Industrie"),
+    36: ("minecraft:gravel",               0,   2, "Straßenverkehrsfläche (Hintergrund)"),
+    37: ("minecraft:grass_block",          0,   3, "Wohngebiet / Siedlungsgrün"),
 }
 
 def get_osm_block(osm_value):
@@ -78,20 +80,20 @@ VERKEHR_MAP = {
     "AX_Landesstrasse":             11,
     "AX_Kreisstrasse":              12,
     "AX_Gemeindestrasse":           13,
-    "AX_Strassenverkehr":           35,   # Straßenverkehrsfläche → Schotter
-    "AX_Platz":                     35,   # Platz → Schotter
+    "AX_Strassenverkehr":           36,   # Straßenverkehrsfläche → Hintergrundgravel
+    "AX_Platz":                     36,   # Platz → Hintergrundgravel
     "AX_Weg":                       15,
     "AX_FussWandRadweg":            16,
     "AX_Bahnstrecke":               20,
     "AX_Seilbahn":                  20,
     # numerische OAK-Codes (kommen je nach Exportformat vor)
-    "42001": 35,  # AX_Strassenverkehr (Fläche) → Schotter
+    "42001": 36,  # AX_Strassenverkehr (Fläche) → Hintergrundgravel
     "42003": 10,  # Bundesstraße (Linie)
     "42005": 11,  # Landesstraße
     "42006": 12,  # Kreisstraße
     "42007": 13,  # Gemeindestraße
     "42008": 14,  # Wirtschaftsweg
-    "42009": 35,  # AX_Platz → Schotter
+    "42009": 36,  # AX_Platz → Hintergrundgravel
     "42010": 15,  # Weg
     "42015": 16,  # Fußweg
     "42016": 17,  # Radweg
@@ -155,19 +157,19 @@ VEGETATION_MAP = {
 
 # Siedlung (sie) – nur Grünflächen, Friedhöfe etc. (Gebäude kommen aus LoD2)
 SIEDLUNG_MAP = {
-    "AX_SportFreizeitUndErholungsflaeche": 30,
-    "AX_Friedhof":                         30,
-    "AX_Grünanlage":                       30,
-    "AX_FlaecheGemischterNutzung":         35,  # Mischnutzung → Schotter
-    "AX_Wohnbauflaeche":                   30,  # Wohnbaufläche → Wiese
-    "AX_IndustrieUndGewerbeflaeche":       35,  # Gewerbe → Schotter
-    "AX_FlaecheBesondererFunktionalerPraegung": 35,
-    "41008": 30,  # Sport-/Freizeitanlage
-    "41009": 30,  # Campingplatz
-    "41010": 30,  # Friedhof
-    "41006": 35,  # Gemischte Fläche → Schotter
-    "41007": 35,  # Besondere Prägung → Schotter
-    "41001": 30,  # Wohnbau → Wiese
+    "AX_SportFreizeitUndErholungsflaeche": 37,  # Sport/Erholung → Siedlungsgrün
+    "AX_Friedhof":                         37,  # Friedhof → Siedlungsgrün
+    "AX_Grünanlage":                       37,  # Park/Grünanlage → Siedlungsgrün
+    "AX_FlaecheGemischterNutzung":         36,  # Mischnutzung → Hintergrundgravel
+    "AX_Wohnbauflaeche":                   37,  # Wohnbaufläche → Siedlungsgrün
+    "AX_IndustrieUndGewerbeflaeche":       35,  # Gewerbe → Schotter (dominiert)
+    "AX_FlaecheBesondererFunktionalerPraegung": 36,  # Sondernutzung → Hintergrundgravel
+    "41008": 37,  # Sport-/Freizeitanlage
+    "41009": 37,  # Campingplatz
+    "41010": 37,  # Friedhof
+    "41006": 36,  # Gemischte Fläche → Hintergrundgravel
+    "41007": 36,  # Besondere Prägung → Hintergrundgravel
+    "41001": 37,  # Wohnbau → Siedlungsgrün
     "41002": 35,  # Gewerbe → Schotter
 }
 

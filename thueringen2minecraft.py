@@ -616,11 +616,11 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
                     else:
                         writer.set_block(bx, sy, bz, osm_block)
 
-                # Bäume nur auf Wald (31) und Wiese (30)
-                if osm_val in (30, 31):
+                # Bäume nur auf Wald (31), Wiese (30) und Siedlungsgrün (37)
+                if osm_val in (30, 31, 37):
                     h = float(ndsm[row, col])
                     if h < 4.0:
-                        h = 7.0 if osm_val == 31 else 5.0
+                        h = 7.0 if osm_val == 31 else 5.0  # 37 = wie Wiese
                     ndsm_cls_val = int(ndsm_classes[row, col])
                     if h > 2.0 and not building_bool[row, col] and ndsm_cls_val != 1:
                         near_building = building_bool[
@@ -637,7 +637,7 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
                                 )
                                 if not too_close:
                                     ttype = "spruce" if (row + col) % 3 == 0 else "oak"
-                                    if osm_val == 30:
+                                    if osm_val in (30, 37):
                                         ttype = "birch"
                                     tree_queue.append((bx, bz, sy, h, ttype))
 
