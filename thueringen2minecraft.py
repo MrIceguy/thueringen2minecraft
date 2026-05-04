@@ -22,7 +22,7 @@ import argparse
 import os
 from pathlib import Path
 from rasterio.warp import reproject, Resampling as RS
-from scipy.ndimage import uniform_filter, label as ndlabel
+from scipy.ndimage import maximum_filter, label as ndlabel
 
 from entity_writer import EntityWriter, populate_city
 from tile_loader import (
@@ -83,9 +83,9 @@ def compute_ndsm(dgm, dgm_ox, dgm_oy, dgm_res,
 
 def classify_ndsm(ndsm):
     """Klassifiziert nDSM → 0=Boden, 1=Gebaeude(nDSM), 2=Vegetation."""
-    lmax = uniform_filter(ndsm,  size=5, mode="reflect")
-    lmin = uniform_filter(-ndsm, size=5, mode="reflect")
-    rough    = lmax + lmin
+    lmax = maximum_filter(ndsm,  size=5, mode="reflect")
+    lmin = maximum_filter(-ndsm, size=5, mode="reflect")
+    rough    = lmax + lmin   # = local_max - local_min = lokale Spannweite
     elevated = ndsm > THRESH_MIN_OBJECT
     is_veg   = elevated & (rough >  THRESH_VEG_ROUGH) & (ndsm < THRESH_BUILDING_MAX)
     is_braw  = elevated & (rough <= THRESH_VEG_ROUGH) & (ndsm < THRESH_BUILDING_MAX)
@@ -151,7 +151,8 @@ def get_terrain_column(surface_y, real_h, osm_val):
 
 
 def _place_tree(writer, bx, bz, sy, obj_h, tree_type=None, building_mask=None):
-    h       = max(3, min(int(obj_h), 22))
+    h_var   = (bx * 3 + bz * 7) % 7 - 3          # -3 … +3 Blöcke Höhenvariation
+    h       = max(3, min(int(obj_h) + h_var, 22))
     trunk_h = max(1, h - 4)
 
     if tree_type is None:
@@ -170,6 +171,16 @@ def _place_tree(writer, bx, bz, sy, obj_h, tree_type=None, building_mask=None):
             if 0 <= z < H and 0 <= x < W and building_mask[z, x]:
                 return
         writer.set_block(x, y, z, block)
+
+    # Busch: kompakter Blätterhaufen, kein Stamm
+    if tree_type == "bush":
+        oak_l = "minecraft:oak_leaves[persistent=true]"
+        for dy in range(3):
+            r = 1 if dy < 2 else 0
+            for dx in range(-r, r + 1):
+                for dz in range(-r, r + 1):
+                    safe_set(bx + dx, sy + 1 + dy, bz + dz, oak_l)
+        return
 
     # Blaetter zuerst
     if tree_type == "spruce":
@@ -298,15 +309,20 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
                           lod2_roof_mc, lod2_roof_type,
                           dgm_ox=0, dgm_oy=0, dgm_res=1.0,
                           buildings=None, alkis_buildings=None,
-                          bridge_mask=None, ortslage_mask=None):
+                          bridge_mask=None, ortslage_mask=None,
+                          writer=None, _is_tile=False,
+                          output_dir=None, precomp_church_mask=None,
+                          church_points=None):
     from anvil_writer import WorldWriter, write_level_dat
     from scipy.ndimage import maximum_filter, binary_erosion, distance_transform_edt, label as ndlabel
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    _out = output_dir or OUTPUT_DIR
+    os.makedirs(_out, exist_ok=True)
     H, W = dgm.shape
     print(f"  {W} x {H} Bloecke")
 
-    writer    = WorldWriter(OUTPUT_DIR)
+    if writer is None:
+        writer = WorldWriter(_out)
     prog_step = max(1, H // 40)
 
     print("  Berechne glatte Gebaeude-Basis...")
@@ -317,8 +333,13 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
     if bridge_mask is not None and bridge_mask.any():
         # Nur Brückenpixel: max Straßenhöhe aus Umgebung (überspringt das Tal)
         road_y_map = np.where(road_mask_r & ~bridge_mask, mc_y_grid, 0).astype(np.int32)
-        road_y_max = _mxf(road_y_map, size=31)
-        road_y_grid[bridge_mask] = road_y_max[bridge_mask]
+        road_y_max = _mxf(road_y_map, size=101)
+        # Fallback auf mc_y_grid wenn keine Straße in Nähe (verhindert sy=-1 Loch)
+        road_y_grid[bridge_mask] = np.where(
+            road_y_max[bridge_mask] > 0,
+            road_y_max[bridge_mask],
+            mc_y_grid[bridge_mask].astype(np.int32)
+        )
     smooth_base = _mxf(mc_y_grid, size=3, mode='nearest')  # fuer Dach
 
     # Boden pro Gebaeude: Median der Terrain-Y-Werte aller Pixel des Gebaeudes
@@ -339,76 +360,77 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
         elif h < 20: return "minecraft:light_gray_concrete", "minecraft:gray_concrete"
         else:        return "minecraft:quartz_block",        "minecraft:smooth_quartz"
 
-    comp_wall_mat = {}   # comp_id → (wall_b, roof_b)
+    comp_wall_mat   = {}   # comp_id → (wall_b, roof_b)
+    comp_flat_top_y = {}   # comp_id → einheitliche top_y für Flachdächer
+    _STORY_H_PRE    = 4
+    _PITCHED_TYPES  = {2100, 3100, 3200, 4000}
     for comp_id in np.unique(labeled_bldg):
         if comp_id == 0: continue
         comp_mask = labeled_bldg == comp_id
-        # max Gebäudehöhe der Komponente bestimmt das Material
         h_max = float((lod2_roof_mc[comp_mask] - smooth_floor[comp_mask]).max())
         comp_wall_mat[comp_id] = mat_for_h(h_max)
-    church_mask = np.zeros(dgm.shape, dtype=bool)
-    church_comp_ids = set()
+        # Flachdach: einheitliche Höhe per Median → keine unebenen Dächer
+        if not bool(np.isin(lod2_roof_type[comp_mask], list(_PITCHED_TYPES)).any()):
+            med_roof = int(np.median(lod2_roof_mc[comp_mask]))
+            med_floor = int(np.median(smooth_floor[comp_mask]))
+            raw_h_med = med_roof - med_floor
+            h_med = max(_STORY_H_PRE,
+                        int((raw_h_med + _STORY_H_PRE // 2) // _STORY_H_PRE) * _STORY_H_PRE)
+            h_med = min(h_med, 80)
+            comp_flat_top_y[comp_id] = med_floor + h_med
     H_m, W_m = lod2_mask.shape
-    dgm_north = dgm_oy + H_m * dgm_res  # dgm_oy ist Sued-Kante, Nord = Sued + H*res
+    dgm_north = dgm_oy + H_m * dgm_res
     dgm_west  = dgm_ox
 
-    # Methode 1: ATKIS CHURCH_POINTS — findet Severikirche (60-93m vom Punkt)
-    if CHURCH_POINTS and buildings:
-        from shapely.geometry import Point
-        for cx, cy in CHURCH_POINTS:
-            pt = Point(cx, cy)
-            print(f"    ATKIS Turm @ E{cx:.0f} N{cy:.0f}")
-            matched_ids = set()
-            for bldg in buildings:
-                fp = bldg.get("footprint")
-                if fp is None: continue
-                if fp.distance(pt) < 150:
-                    try:
-                        tp = fp.representative_point()
-                    except Exception:
-                        tp = fp.centroid
-                    col_f = (tp.x - dgm_west) / dgm_res
-                    row_f = (dgm_north - tp.y) / dgm_res
-                    ci_b, ri_b = int(round(col_f)), int(round(row_f))
+    # Vorab berechnete church_mask nutzen (tiled mode) oder frisch berechnen
+    if precomp_church_mask is not None:
+        church_mask = precomp_church_mask.astype(bool)
+    else:
+        church_mask = np.zeros(dgm.shape, dtype=bool)
+        church_comp_ids = set()
+        _church_pts = church_points if church_points is not None else CHURCH_POINTS
+
+        if _church_pts and buildings:
+            from shapely.geometry import Point
+            for cx, cy in _church_pts:
+                pt = Point(cx, cy)
+                matched_ids = set()
+                for bldg in buildings:
+                    fp = bldg.get("footprint")
+                    if fp is None: continue
+                    if fp.distance(pt) < 150:
+                        try: tp = fp.representative_point()
+                        except: tp = fp.centroid
+                        ci_b = int(round((tp.x - dgm_west) / dgm_res))
+                        ri_b = int(round((dgm_north - tp.y) / dgm_res))
+                        if 0 <= ri_b < H_m and 0 <= ci_b < W_m:
+                            cid = int(labeled_bldg[ri_b, ci_b])
+                            if cid > 0: matched_ids.add(cid)
+                church_comp_ids.update(matched_ids)
+
+        for comp_id in np.unique(labeled_bldg):
+            if comp_id == 0: continue
+            comp = labeled_bldg == comp_id
+            if float(lod2_heights[comp].max()) > 40:
+                church_comp_ids.add(comp_id)
+
+        if alkis_buildings:
+            try:
+                from alkis_loader import get_church_footprints
+                for fp in get_church_footprints(alkis_buildings):
+                    try: tp = fp.representative_point()
+                    except: tp = fp.centroid
+                    ci_b = int(round((tp.x - dgm_west) / dgm_res))
+                    ri_b = int(round((dgm_north - tp.y) / dgm_res))
                     if 0 <= ri_b < H_m and 0 <= ci_b < W_m:
                         cid = int(labeled_bldg[ri_b, ci_b])
-                        if cid > 0:
-                            matched_ids.add(cid)
-            church_comp_ids.update(matched_ids)
-            print(f"      → {len(matched_ids)} Komp. (ATKIS, radius=150m)")
+                        if cid > 0: church_comp_ids.add(cid)
+            except Exception:
+                pass
 
-    # Methode 2: Alle Komponenten >40m sind Kirchen — kein Wohngebäude erreicht 40m
-    for comp_id in np.unique(labeled_bldg):
-        if comp_id == 0: continue
-        comp = labeled_bldg == comp_id
-        if float(lod2_heights[comp].max()) > 40:
-            church_comp_ids.add(comp_id)
-            print(f"    LoD2 >40m: Komp.{comp_id} h={lod2_heights[comp].max():.0f}m")
-
-    # Methode 3: ALKIS GFK-Codes (falls WFS funktioniert)
-    if alkis_buildings:
-        try:
-            from alkis_loader import get_church_footprints
-            for fp in get_church_footprints(alkis_buildings):
-                try: tp = fp.representative_point()
-                except: tp = fp.centroid
-                col_f = (tp.x - dgm_west) / dgm_res
-                row_f = (dgm_north - tp.y) / dgm_res
-                ci_b, ri_b = int(round(col_f)), int(round(row_f))
-                if 0 <= ri_b < H_m and 0 <= ci_b < W_m:
-                    cid = int(labeled_bldg[ri_b, ci_b])
-                    if cid > 0: church_comp_ids.add(cid)
-        except Exception as e:
-            pass
-
-    if not church_comp_ids:
-        print("  Keine Kirchturm-Komponenten gefunden")
-    else:
         for comp_id in church_comp_ids:
             church_mask[labeled_bldg == comp_id] = True
-        n_church_px = int(church_mask.sum())
-        n_comps = len(set(np.unique(labeled_bldg[church_mask])) - {0})
-        print(f"  Kirchengebaeude erkannt: {n_church_px:,} px  ({n_comps} Komponenten)")
+        print(f"  Kirchengebaeude: {int(church_mask.sum()):,} px")
 
     print("  Berechne Gebaeude-Innen/Aussen...")
     struct        = np.array([[0,1,0],[1,1,1],[0,1,0]], dtype=bool)
@@ -427,6 +449,12 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
     from scipy.ndimage import maximum_filter as _maxf
     bldg_top_raster = _maxf(bldg_top_raw, size=21, mode='constant', cval=0)
     # size=21 → 10px Radius um jedes Gebaeude-Pixel
+
+    print("  Berechne Wasser-Tal-Raster (20m Radius)...")
+    _dgm_tmp = np.where(np.isnan(dgm),
+                        float(np.nanpercentile(dgm[~np.isnan(dgm)], 5)),
+                        dgm)
+    water_max_raster = _maxf(_dgm_tmp, size=41, mode='nearest')
 
     print("  Berechne Spitzdach-Offsets...")
     pitched_mask = building_bool & np.isin(lod2_roof_type, [2100, 3100, 3200, 4000])
@@ -480,6 +508,34 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
         else:
             door_mask[r, c] = False
 
+    # Laternen-Maske vorberechnen: exakt 1 Laterne pro 20×20-Zelle am Straßenrand
+    print("  Berechne Laternen-Positionen...")
+    from scipy.ndimage import binary_erosion as _be_lt
+    _road_px   = (osm_raster >= 10) & (osm_raster <= 20)
+    _road_edge = _road_px & ~_be_lt(_road_px)
+    _LSPC      = 20
+    lantern_mask = np.zeros(osm_raster.shape, dtype=bool)
+    for _gi in range(0, H, _LSPC):
+        for _gj in range(0, W, _LSPC):
+            _cell = _road_edge[_gi:_gi+_LSPC, _gj:_gj+_LSPC]
+            if not _cell.any():
+                continue
+            _ys, _xs = np.where(_cell)
+            _cy, _cx = _LSPC // 2, _LSPC // 2
+            _best = int(np.argmin(np.abs(_ys - _cy) + np.abs(_xs - _cx)))
+            lantern_mask[_gi + _ys[_best], _gj + _xs[_best]] = True
+    print(f"    {int(lantern_mask.sum()):,} Laternen-Kandidaten")
+
+    # Bürgersteig-Maske: 2px-Puffer um Hauptstraßen, nur in Ortslage
+    print("  Berechne Bürgersteig-Maske...")
+    from scipy.ndimage import binary_dilation as _bd_sw
+    _road_px_sw  = np.isin(osm_raster, [10, 11, 12, 13, 14])
+    _road_dil_sw = _bd_sw(_road_px_sw, iterations=2)
+    _excl_sw     = np.isin(osm_raster, list(range(10, 22)) + [16, 35])  # Straßen, Gleise, Wege, Schotter
+    _ort_sw      = ortslage_mask.astype(bool) if ortslage_mask is not None else np.ones(osm_raster.shape, dtype=bool)
+    sidewalk_mask = _road_dil_sw & ~_excl_sw & ~(lod2_mask == 1) & _ort_sw
+    print(f"    {int(sidewalk_mask.sum()):,} Bürgersteig-Pixel")
+
     # Baum-Positionen sammeln (nach Terrain setzen, damit Gras nicht ueberschreibt)
     tree_queue = []
     eff_top_grid = np.zeros(dgm.shape, dtype=np.int32)  # tatsächliches top_y nach Runden
@@ -495,7 +551,10 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
 
             sy      = int(mc_y_grid[row, col])
             if bridge_mask is not None and bridge_mask[row, col]:
-                sy = int(road_y_grid[row, col]) - 1  # Brücke: 1 Block unter Straßenniveau
+                # Nur echte Fluss-Überquerungen (>2m Taltiefe) → Brücke absenken
+                rdy = int(road_y_grid[row, col])
+                if rdy > 0 and float(water_max_raster[row, col]) - float(real_h) > 2.0:
+                    sy = rdy - 1
             osm_val = int(osm_raster[row, col])
             bx, bz  = col, row
 
@@ -519,7 +578,10 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
                 r_offset  = int(roof_offset[row, col])
                 top_y     = roof_mc_y if roof_mc_y > base_y else base_y + max(3, int(round(height_m)))
                 top_y    += r_offset
-                eff_top_grid[row, col] = top_y
+                # Flachdach: einheitliche Höhe per Komponente (kein unebenes Dach)
+                cid_pre = int(labeled_bldg[row, col])
+                if r_type not in _PITCHED_TYPES and cid_pre in comp_flat_top_y:
+                    top_y = comp_flat_top_y[cid_pre] + r_offset
                 is_door   = bool(door_mask[row, col])
                 if is_door:
                     if height_m < 4.0 or (top_y - floor_y) < 3:
@@ -540,15 +602,16 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
                     else:
                         frame_b = comp_wall_mat.get(cid_door, ("minecraft:white_concrete",))[0]
 
+                    _ROAD_CLS = {10,11,12,13,14,15,16,17,20,35}
                     perp = [(dr[1], dr[0]), (-dr[1], -dr[0])]
                     for pr, pc in perp:
                         sr, sc = row+pr, col+pc
                         if 0 <= sr < H and 0 <= sc < W and not building_bool[sr, sc]:
+                            if int(osm_raster[sr, sc]) in _ROAD_CLS:
+                                continue  # kein Türrahmen auf Straße/Gravel
                             ext_frame = int(mc_y_grid[sr, sc])
-                            # Nach unten bis Terrain auffuellen
                             for fy in range(ext_frame, floor_y):
                                 writer.set_block(int(sc), fy, int(sr), frame_b)
-                            # Rahmen 4 Bloecke hoch
                             for fy in range(floor_y, floor_y + 4):
                                 writer.set_block(int(sc), fy, int(sr), frame_b)
 
@@ -558,47 +621,50 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
 
                     nr1 = row + dr[0]; nc1 = col + dr[1]
                     if 0 <= nr1 < H and 0 <= nc1 < W and not building_bool[nr1, nc1]:
-                        ext_sy = int(mc_y_grid[nr1, nc1])
+                        # Kein Treppenhaus wenn direkt vor der Tür Straße/Gravel liegt
+                        if int(osm_raster[int(nr1), int(nc1)]) not in _ROAD_CLS:
+                            ext_sy = int(mc_y_grid[nr1, nc1])
 
-                        if ext_sy > floor_y:
-                            # Terrain hoeher: loeschen, dann pruefen ob Treppe noetig
-                            door_clear_list.append((int(nc1), ext_sy, int(nr1)))
-                            post_ramp_list.append(("stone", int(nc1), floor_y, int(nr1)))
-                            nr2 = row + dr[0]*2; nc2 = col + dr[1]*2
-                            if 0 <= nr2 < H and 0 <= nc2 < W and not building_bool[nr2, nc2]:
-                                ext_sy2 = int(mc_y_grid[nr2, nc2])
-                                if ext_sy2 > floor_y:
-                                    # Zweiter Block auch erhoeht: Treppe setzen
-                                    for fy in range(floor_y + 2, ext_sy2 + 1):
-                                        door_clear_list.append((int(nc2), fy, int(nr2)))
-                                    post_ramp_list.append(("stone", int(nc2), floor_y, int(nr2)))
-                                    post_ramp_list.append(("stair_down", int(nc2), floor_y + 1, int(nr2), stair_face_down))
-                                # else: ebenerdig nach erstem Block, keine Treppe noetig
+                            if ext_sy > floor_y:
+                                door_clear_list.append((int(nc1), ext_sy, int(nr1)))
+                                post_ramp_list.append(("stone", int(nc1), floor_y, int(nr1)))
+                                nr2 = row + dr[0]*2; nc2 = col + dr[1]*2
+                                if 0 <= nr2 < H and 0 <= nc2 < W and not building_bool[nr2, nc2]:
+                                    ext_sy2 = int(mc_y_grid[nr2, nc2])
+                                    if ext_sy2 > floor_y:
+                                        for fy in range(floor_y + 2, ext_sy2 + 1):
+                                            door_clear_list.append((int(nc2), fy, int(nr2)))
+                                        post_ramp_list.append(("stone", int(nc2), floor_y, int(nr2)))
+                                        post_ramp_list.append(("stair_down", int(nc2), floor_y + 1, int(nr2), stair_face_down))
 
-                        elif ext_sy <= floor_y - 2:
-                            # Terrain 2+ Bloecke tiefer: Treppe RUNTER
-                            diff = floor_y - ext_sy
-                            for step in range(min(diff, 3)):
-                                snr = row + dr[0]*(step+1)
-                                snc = col + dr[1]*(step+1)
-                                if not (0 <= snr < H and 0 <= snc < W) or building_bool[snr, snc]:
-                                    break
-                                stair_y = floor_y - step
-                                s_ext = int(mc_y_grid[snr, snc])
-                                writer.set_block(int(snc), s_ext, int(snr), "minecraft:stone_bricks")
-                                for fy in range(s_ext + 1, stair_y):
-                                    writer.set_block(int(snc), fy, int(snr), "minecraft:stone_bricks")
-                                writer.set_block(int(snc), stair_y, int(snr),
-                                    f"minecraft:stone_brick_stairs[facing={stair_face_up},half=bottom,shape=straight]")
-                                door_clear_list.append((int(snc), stair_y + 1, int(snr)))
-                        # diff 0 oder -1: ebenerdig, nichts noetig
+                            elif ext_sy == floor_y - 1:
+                                # Terrain genau 1 Block tiefer: einzelne Eingangsstufe
+                                if int(osm_raster[int(nr1), int(nc1)]) not in _ROAD_CLS:
+                                    door_clear_list.append((int(nc1), ext_sy + 1, int(nr1)))
+                                    post_ramp_list.append(("stair_up_1", int(nc1), floor_y, int(nr1), stair_face_up))
 
-                # Erweiterte Hoehe: nur fuer wall_mask-Pixel, Nachbar-Max bestimmen
-                extended_top = top_y
+                            elif ext_sy <= floor_y - 2:
+                                # Terrain 2+ Bloecke tiefer: Treppe RUNTER
+                                diff = floor_y - ext_sy
+                                for step in range(min(diff, 3)):
+                                    snr = row + dr[0]*(step+1)
+                                    snc = col + dr[1]*(step+1)
+                                    if not (0 <= snr < H and 0 <= snc < W) or building_bool[snr, snc]:
+                                        break
+                                    if int(osm_raster[int(snr), int(snc)]) in _ROAD_CLS:
+                                        break  # keine Treppe auf Straße/Gravel
+                                    stair_y = floor_y - step
+                                    s_ext = int(mc_y_grid[snr, snc])
+                                    writer.set_block(int(snc), s_ext, int(snr), "minecraft:stone_bricks")
+                                    for fy in range(s_ext + 1, stair_y):
+                                        writer.set_block(int(snc), fy, int(snr), "minecraft:stone_bricks")
+                                    writer.set_block(int(snc), stair_y, int(snr),
+                                        f"minecraft:stone_brick_stairs[facing={stair_face_up},half=bottom,shape=straight]")
+                                    door_clear_list.append((int(snc), stair_y + 1, int(snr)))
 
-                cid = int(labeled_bldg[row, col])
+                cid = cid_pre
                 mat = comp_wall_mat.get(cid, (None, None))
-                _place_building_pixel(writer, bx, bz, floor_y, top_y,
+                actual_top = _place_building_pixel(writer, bx, bz, floor_y, top_y,
                                       is_wall=bool(wall_mask[row, col]),
                                       roof_type=r_type,
                                       is_door=is_door,
@@ -606,6 +672,10 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
                                       is_church=bool(church_mask[row, col]),
                                       forced_wall_b=mat[0],
                                       forced_roof_b=mat[1])
+                eff_top_grid[row, col] = actual_top
+
+            elif sidewalk_mask[row, col]:
+                writer.set_block(bx, sy, bz, "minecraft:smooth_stone")
 
             elif osm_val > 0 and not is_water(osm_val):
                 osm_block = get_osm_block(osm_val)
@@ -618,57 +688,76 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
 
                 # Bäume nur auf Wald (31) und Wiese (30)
                 if osm_val in (30, 31):
-                    h = float(ndsm[row, col])
-                    if h < 4.0:
-                        h = 7.0 if osm_val == 31 else 5.0
+                    h        = float(ndsm[row, col])
                     ndsm_cls_val = int(ndsm_classes[row, col])
-                    if h > 2.0 and not building_bool[row, col] and ndsm_cls_val != 1:
+                    if osm_val == 31 and h < 4.0:
+                        # Wald ohne DOM-Daten: synthetische Höhe
+                        h = 7.0 + (row * 3 + col * 5) % 5 - 1
+                    # Wiese: nur echter DOM-Nachweis (bestätigte Vegetation, cls==2)
+                    # Baum: h≥3.0m | Busch: 1.5m≤h<3.0m
+                    wiese_baum  = (osm_val == 30 and ndsm_cls_val == 2 and h >= 3.0)
+                    wiese_busch = (osm_val == 30 and ndsm_cls_val == 2 and 1.5 <= h < 3.0)
+                    wald_ok     = (osm_val == 31 and h > 2.0 and ndsm_cls_val != 1)
+                    if (wiese_baum or wiese_busch or wald_ok) and not building_bool[row, col]:
+                        # Bäume: 5px Abstand, Büsche: 2px Abstand von Gebäuden
+                        _nb_r = 2 if wiese_busch else 5
                         near_building = building_bool[
-                            max(0,row-12):min(H,row+13),
-                            max(0,col-12):min(W,col+13)
+                            max(0,row-_nb_r):min(H,row+_nb_r+1),
+                            max(0,col-_nb_r):min(W,col+_nb_r+1)
                         ].any()
-                        if not near_building:
+                        # Straße im 1px-Kern blocken (nicht Wegesrand/Parkplatzrand)
+                        _core = osm_raster[max(0,row-1):min(H,row+2), max(0,col-1):min(W,col+2)]
+                        _on_road = bool(((_core >= 10) & (_core <= 20)).any())
+                        if not near_building and not _on_road:
                             seed = (row * 7 + col * 13) % 10
-                            threshold = 2 if osm_val == 31 else 1
+                            if wald_ok:
+                                threshold = 4          # Wald: 40%
+                                min_gap   = 3 + (row + col) % 3
+                                ttype_list = ["spruce","spruce","spruce","spruce","spruce","oak","oak","oak","dark_oak","dark_oak"]
+                                use_h = h
+                            elif wiese_baum:
+                                threshold = 2          # Wiese Baum: 20%
+                                min_gap   = 7 + (row + col) % 3
+                                ttype_list = ["birch","birch","birch","birch","birch","birch","oak","oak","oak","dark_oak"]
+                                use_h = h
+                            else:                      # wiese_busch: 40%
+                                threshold = 4
+                                min_gap   = 3 + (row + col) % 2
+                                ttype_list = ["bush"] * 10
+                                use_h = 2.5
                             if seed < threshold:
                                 too_close = any(
-                                    abs(tx - col) <= 5 and abs(tz - row) <= 5
+                                    abs(tx - col) <= min_gap and abs(tz - row) <= min_gap
                                     for tx, tz, *_ in tree_queue[-100:]
                                 )
                                 if not too_close:
-                                    ttype = "spruce" if (row + col) % 3 == 0 else "oak"
-                                    if osm_val == 30:
-                                        ttype = "birch"
-                                    tree_queue.append((bx, bz, sy, h, ttype))
+                                    type_seed = (row * 11 + col * 7) % 10
+                                    tree_queue.append((bx, bz, sy, use_h, ttype_list[type_seed]))
 
                 # Deko auch auf ATKIS-Flaechen
                 _place_decoration(writer, bx, bz, sy, row, col,
                                   osm_val, osm_raster, lod2_mask, H, W,
                                   bldg_top_raster=bldg_top_raster,
-                                  in_ortslage=ortslage_mask[row, col] if ortslage_mask is not None else True)
+                                  in_ortslage=ortslage_mask[row, col] if ortslage_mask is not None else True,
+                                  lantern_mask=lantern_mask)
 
             elif osm_val > 0 and is_water(osm_val):
-                # Unterirdischen Fluss erkennen: echter Fluss liegt im DGM-Tiefpunkt
-                # (Flusstal), unterirdischer Fluss liegt unter ebenem Gelände (Parkplatz).
-                # Prüfe ob DGM-Wert in 8m Umgebung ein lokales Minimum ist.
-                r1 = max(0, row - 8);  r2 = min(H, row + 9)
-                c1 = max(0, col - 8);  c2 = min(W, col + 9)
-                local_region = dgm[r1:r2, c1:c2]
-                valid = local_region[~np.isnan(local_region)]
-                if len(valid) > 0:
-                    local_min = float(np.percentile(valid, 10))
-                    is_valley = float(real_h) <= local_min + 0.5
-                else:
-                    is_valley = True
+                # class 2 = stehendes Gewässer (Teich/See): immer Wasser
+                # class 1 = Fließgewässer: nur wenn Umgebung >1m höher (Talcheck)
+                is_still = (osm_val == 2)
+                is_valley = is_still or (float(water_max_raster[row, col]) - float(real_h) > 1.0)
 
                 if is_valley:
-                    # Echter Fluss: fließendes Wasser (level=7 = fließt, breitet sich nicht aus)
                     writer.set_block(bx, sy - 1, bz, "minecraft:gravel")
                     writer.set_block(bx, sy,     bz, "minecraft:water[level=7]")
                     writer.set_block(bx, sy + 1, bz, "minecraft:water[level=7]")
                 else:
-                    # Unterirdischer Abschnitt: Boden rendern (Gras oder was osm sagt)
+                    # Flache Drainage o.ä. → als Gras rendern
                     writer.set_block(bx, sy, bz, "minecraft:grass_block")
+                    _place_decoration(writer, bx, bz, sy, row, col,
+                                      30, osm_raster, lod2_mask, H, W,
+                                      bldg_top_raster=bldg_top_raster,
+                                      in_ortslage=ortslage_mask[row, col] if ortslage_mask is not None else True)
 
             else:
                 # Natuerliche Oberflaeche
@@ -678,17 +767,20 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
                 writer.set_block(bx, sy, bz, surf)
 
                 h = float(ndsm[row, col])
-                # Kein Baum auf nDSM-erkannten Gebaeuden (z.B. Gebaeude ohne LoD2-Daten)
-                if h > 2.0 and int(ndsm_classes[row, col]) != 1:
-                    seed = (row * 5 + col * 19) % 10
-                    if seed < 3:
-                        tree_queue.append((bx, bz, sy, h, None))
+                if h > 3.5 and int(ndsm_classes[row, col]) == 2:
+                    _core2 = osm_raster[max(0,row-1):min(H,row+2), max(0,col-1):min(W,col+2)]
+                    _on_road2 = bool(((_core2 >= 10) & (_core2 <= 20)).any())
+                    if not _on_road2:
+                        seed = (row * 5 + col * 19) % 10
+                        if seed < 2:
+                            tree_queue.append((bx, bz, sy, h, None))
 
                 # Dekoration
                 _place_decoration(writer, bx, bz, sy, row, col,
                                   osm_val, osm_raster, lod2_mask, H, W,
                                   bldg_top_raster=bldg_top_raster,
-                                  in_ortslage=ortslage_mask[row, col] if ortslage_mask is not None else True)
+                                  in_ortslage=ortslage_mask[row, col] if ortslage_mask is not None else True,
+                                  lantern_mask=lantern_mask)
 
     # Wandverlaengerung erfolgt jetzt direkt in _place_building_pixel via extended_top
     # Separater Pass: Lücken zwischen verschieden hohen Gebäudeteilen schließen.
@@ -709,17 +801,22 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
             else:
                 wc = comp_wall_mat.get(cid, (None,))[0] or "minecraft:white_concrete"
 
-            # Höchsten Nachbarn finden (aus eff_top_grid — gerundetem Wert)
-            max_nb_top = this_top
+            # Basishoehe = ohne Spitzdach-Offset (r_offset)
+            this_offset   = int(roof_offset[r, c])
+            this_base_top = this_top - this_offset
+            max_fill_top  = this_base_top
+
             for dr2, dc2 in [(-1,0),(1,0),(0,-1),(0,1)]:
                 nr2, nc2 = r+dr2, c+dc2
                 if not (0 <= nr2 < H and 0 <= nc2 < W): continue
                 if not building_bool[nr2, nc2]: continue
-                nb_t = int(eff_top_grid[nr2, nc2])
-                if nb_t > max_nb_top and nb_t - this_top < 80:
-                    max_nb_top = nb_t
+                nb_base_t = int(eff_top_grid[nr2, nc2]) - int(roof_offset[nr2, nc2])
+                if nb_base_t > max_fill_top and nb_base_t - this_base_top < 80:
+                    max_fill_top = nb_base_t
 
-            if max_nb_top <= this_top + 3: continue
+            if max_fill_top <= this_base_top: continue
+            # Fülle nur oberhalb des bereits gerenderten (tatsächlichen) Top
+            max_nb_top = max_fill_top
 
             bx = c
             bz = r
@@ -739,12 +836,23 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
         writer.delete_block(cx, cy,     cz)
         writer.delete_block(cx, cy + 1, cz)
         writer.delete_block(cx, cy + 2, cz)
+    _ROAD_SET = {10,11,12,13,14,15,16,17,20,35}
     for item in post_ramp_list:
         if item[0] == "stone":
             _, x, y, z = item
+            if int(osm_raster[z, x]) in _ROAD_SET:
+                continue
             writer.set_block(x, y, z, "minecraft:stone_bricks")
         elif item[0] == "stair_down":
             _, x, y, z, face = item
+            if int(osm_raster[z, x]) in _ROAD_SET:
+                continue
+            writer.set_block(x, y, z,
+                f"minecraft:stone_brick_stairs[facing={face},half=bottom,shape=straight]")
+        elif item[0] == "stair_up_1":
+            _, x, y, z, face = item
+            if int(osm_raster[z, x]) in _ROAD_SET:
+                continue
             writer.set_block(x, y, z,
                 f"minecraft:stone_brick_stairs[facing={face},half=bottom,shape=straight]")
     print(f"\n  Setze {len(tree_queue):,} Baeume...")
@@ -767,11 +875,22 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
             _place_church(writer, bx, bz, sy)
 
     print("\n  Bevoelkere die Stadt...")
-    entity_writer = EntityWriter(OUTPUT_DIR)
+    entity_writer = EntityWriter(_out,
+                                 x_offset=writer.x_offset,
+                                 z_offset=writer.z_offset,
+                                 tile_min_x=writer._xmin,
+                                 tile_max_x=writer._xmax,
+                                 tile_min_z=writer._zmin,
+                                 tile_max_z=writer._zmax)
     populate_city(writer, entity_writer,
                   lod2_mask, lod2_heights, lod2_roof_mc, door_mask,
                   smooth_floor, mc_y_grid, dgm.shape)
     entity_writer.save()
+
+    if _is_tile:
+        print("\n  Speichere Tile-Regions...")
+        writer.save()
+        return
 
     print("\n  Speichere Regions...")
     writer.save()
@@ -792,49 +911,48 @@ def write_minecraft_world(dgm, ndsm_classes, ndsm,
 
 def _place_decoration(writer, bx, bz, sy, row, col,
                       osm_val, osm_raster, lod2_mask, H, W,
-                      bldg_top_raster=None, in_ortslage=True):
+                      bldg_top_raster=None, in_ortslage=True, lantern_mask=None):
     seed  = (row * 17 + col * 31) % 100
     seed2 = (row * 53 + col * 7)  % 10
+    # Blumen-Cluster: ~30% der 25×25-Kacheln sind Blumenzonen
+    _zone_seed = ((row // 25) * 41 + (col // 25) * 67) % 100
+    in_flower_zone = _zone_seed < 30
 
     # Keine Deko auf Strassen/Wegen/Bahn (10-20) oder Schotter/Acker (32-33, 35-36)
     if 10 <= osm_val <= 20 or osm_val in (32, 35, 36):
-        # Laternen NUR auf echten Straßen innerhalb Ortslage
-        if osm_val in (10, 11, 12, 13, 14) and seed == 0 and in_ortslage:
-            is_road_edge = any(
-                not (10 <= int(osm_raster[row + dr, col + dc]) <= 20)
-                for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)]
-                if 0 <= row+dr < H and 0 <= col+dc < W
-            )
-            # Kein Spawn wenn LoD2-Gebaeude in 10px Naehe ist
-            near_lod2 = lod2_mask[
-                max(0,row-10):min(H,row+11),
-                max(0,col-10):min(W,col+11)
-            ].any()
-            # Kein Spawn wenn Laterne (sy+2) unter dem Dach eines Nachbargebaeudes liegt
-            inside_building = (
-                bldg_top_raster is not None
-                and int(bldg_top_raster[row, col]) > sy + 2
-            )
-            # Kein Spawn neben einer Tuer (Treppenbereich)
-            near_door = lod2_mask[
-                max(0,row-3):min(H,row+4),
-                max(0,col-3):min(W,col+4)
-            ].any() and any(
-                lod2_mask[row+dr, col+dc]
-                for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)]
-                if 0 <= row+dr < H and 0 <= col+dc < W
-            )
-            if is_road_edge and not near_lod2 and not inside_building and not near_door:
-                for _dy in range(1, 6):
-                    writer.set_block(bx, sy + _dy, bz, "minecraft:end_rod[facing=up]")
-                writer.set_block(bx, sy + 6, bz, "minecraft:lantern[hanging=false]")
+        # Laternen NUR auf echten Straßen innerhalb Ortslage, vorberechnete Maske
+        _on_grid = lantern_mask is not None and bool(lantern_mask[row, col])
+        if osm_val in (10, 11, 12, 13, 14) and _on_grid and in_ortslage:
+            # Outward-Richtung: erster Nicht-Straße-Nachbar = Bürgersteig/Gras
+            outward = None
+            for _dr, _dc in [(-1,0),(1,0),(0,-1),(0,1)]:
+                _nr, _nc = row+_dr, col+_dc
+                if 0 <= _nr < H and 0 <= _nc < W and not (10 <= int(osm_raster[_nr, _nc]) <= 20):
+                    outward = (_dr, _dc, _nr, _nc)
+                    break
+            if outward is not None:
+                _odr, _odc, _onr, _onc = outward
+                if lod2_mask[_onr, _onc] == 1:
+                    # Outward-Pixel ist Gebäude → Fahrbahnkante
+                    lbx, lbz = col, row
+                elif (bldg_top_raster is not None
+                      and 0 < int(bldg_top_raster[_onr, _onc]) <= sy + 5):
+                    # Gebäudedach auf Laternen-Höhe oder darunter → überspringen
+                    return
+                else:
+                    lbx, lbz = _onc, _onr
+            else:
+                # Schmale Straße: kein freier Nachbar → Fahrbahnkante (keine Dach-Prüfung)
+                lbx, lbz = col, row
+            for _dy, _f in enumerate(["up","down","up","down","up"], start=1):
+                writer.set_block(lbx, sy + _dy, lbz, f"minecraft:end_rod[facing={_f}]")
+            writer.set_block(lbx, sy + 6, lbz, "minecraft:lantern[hanging=false]")
         return
 
     near_building = lod2_mask[
         max(0,row-3):min(H,row+4),
         max(0,col-3):min(W,col+4)
     ].any()
-
 
     FLOWERS = [
         "minecraft:dandelion", "minecraft:poppy",
@@ -844,21 +962,52 @@ def _place_decoration(writer, bx, bz, sy, row, col,
         "minecraft:white_tulip", "minecraft:orange_tulip",
         "minecraft:pink_tulip", "minecraft:lily_of_the_valley",
     ]
+    TALL_FLOWERS = [
+        "minecraft:sunflower", "minecraft:lilac",
+        "minecraft:rose_bush", "minecraft:peony",
+    ]
 
-    # Blumen nah an Gebaeuden (Vorgaerten) — haeufiger
-    if near_building and seed < 15:
-        writer.set_block(bx, sy + 1, bz, FLOWERS[seed % len(FLOWERS)])
+    near_road = bool(((osm_raster[
+        max(0,row-2):min(H,row+3),
+        max(0,col-2):min(W,col+3)
+    ] >= 10) & (osm_raster[
+        max(0,row-2):min(H,row+3),
+        max(0,col-2):min(W,col+3)
+    ] <= 20)).any())
+
+
+    # Blumen / hohe Pflanzen nah an Gebaeuden (Vorgaerten)
+    # Dichte nur in Blumenzonen, sonst sehr spärlich
+    flower_thresh = 20 if in_flower_zone else 3
+    if near_building and seed < flower_thresh:
+        if seed2 >= 8:
+            tf = TALL_FLOWERS[seed % len(TALL_FLOWERS)]
+            writer.set_block(bx, sy + 1, bz, f"{tf}[half=lower]")
+            writer.set_block(bx, sy + 2, bz, f"{tf}[half=upper]")
+        else:
+            writer.set_block(bx, sy + 1, bz, FLOWERS[seed % len(FLOWERS)])
         return
 
-    # Blumen auf Wiesen — moderat
-    if not near_building and seed < 8:
-        writer.set_block(bx, sy + 1, bz, FLOWERS[seed % len(FLOWERS)])
+    # Blumen auf Wiesen — nur in Blumenzonen dicht
+    meadow_flower_thresh = 18 if in_flower_zone else 2
+    if not near_building and seed < meadow_flower_thresh:
+        if seed2 == 9:
+            tf = TALL_FLOWERS[seed % len(TALL_FLOWERS)]
+            writer.set_block(bx, sy + 1, bz, f"{tf}[half=lower]")
+            writer.set_block(bx, sy + 2, bz, f"{tf}[half=upper]")
+        else:
+            writer.set_block(bx, sy + 1, bz, FLOWERS[seed % len(FLOWERS)])
         return
 
-    # Gras/Farn auf Wiesen
-    if not near_building and 8 <= seed < 25:
-        writer.set_block(bx, sy + 1, bz,
-                         "minecraft:grass" if seed2 < 7 else "minecraft:fern")
+    # Hohes Gras / Farn / normales Gras auf Wiesen
+    if not near_building and meadow_flower_thresh <= seed < meadow_flower_thresh + 30:
+        if seed2 < 3:
+            writer.set_block(bx, sy + 1, bz, "minecraft:tall_grass[half=lower]")
+            writer.set_block(bx, sy + 2, bz, "minecraft:tall_grass[half=upper]")
+        elif seed2 < 8:
+            writer.set_block(bx, sy + 1, bz, "minecraft:short_grass")
+        else:
+            writer.set_block(bx, sy + 1, bz, "minecraft:fern")
         return
 
     # Zuckerrohr am Wasser
@@ -872,22 +1021,6 @@ def _place_decoration(writer, bx, bz, sy, row, col,
                     writer.set_block(bx, sy + 2, bz, "minecraft:sugar_cane")
                 return
 
-    # Laternen auf Hauptstrassen alle ~12m – nur im Ortslage-Bereich
-    if osm_val in (11, 12, 13) and seed == 0 and in_ortslage:
-        neighbors = [(row+dr, col+dc) for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)]
-                     if 0 <= row+dr < H and 0 <= col+dc < W]
-        road_neighbors = sum(1 for r2,c2 in neighbors if 10 <= int(osm_raster[r2, c2]) <= 20)
-        if road_neighbors < 3:  # mind. 3 Straßen-Nachbarn → echter Straßenrand
-            return
-        is_road_edge = any(not (10 <= int(osm_raster[r2, c2]) <= 20) for r2,c2 in neighbors)
-        near_lod2 = lod2_mask[
-            max(0,row-3):min(H,row+4),
-            max(0,col-3):min(W,col+4)
-        ].any()
-        if is_road_edge and not near_lod2:
-            for _dy in range(1, 6):
-                writer.set_block(bx, sy + _dy, bz, "minecraft:end_rod[facing=up]")
-            writer.set_block(bx, sy + 6, bz, "minecraft:lantern[hanging=false]")
 
 
 def _is_corner_wall(row, col, wall_mask, building_bool, H, W):
@@ -909,8 +1042,16 @@ def _place_building_pixel(writer, bx, bz, floor_y, top_y, is_wall,
                           roof_type=1000, is_door=False, door_facing="south",
                           is_church=False, forced_wall_b=None, forced_roof_b=None):
     raw_h    = top_y - floor_y
-    h_blocks = min(max(3, raw_h), 80)
     STORY_H  = 4
+    has_pitched = roof_type in (2100, 3100, 3200, 4000)
+    if has_pitched:
+        # Spitzdach: rohe Höhe behalten (r_offset formt bereits die Pyramide)
+        h_blocks = min(max(3, raw_h), 80)
+    else:
+        # Flachdach: auf Vielfaches von STORY_H runden + 1 Dachkante
+        # +1 damit hängende Innen-Laternen (lamp_y = n*STORY_H - 1) UNTER dem Dachblock liegen
+        h_blocks = max(STORY_H, int((raw_h + STORY_H // 2) // STORY_H) * STORY_H) + 1
+        h_blocks = min(h_blocks, 80)
 
     if is_church:
         wall_b = "minecraft:stone_bricks"
@@ -963,13 +1104,21 @@ def _place_building_pixel(writer, bx, bz, floor_y, top_y, is_wall,
             writer.set_block(bx, floor_y + h_blocks, bz, RED_ROOF)
 
     else:
-        for story in range(h_blocks // STORY_H + 1):
+        n_full_stories = h_blocks // STORY_H
+        for story in range(n_full_stories + 1):
             story_y = floor_y + story * STORY_H
             if story_y < floor_y + h_blocks - 2:   # nicht direkt unter Dach
                 writer.set_block(bx, story_y, bz, FLOOR_B)
         writer.set_block(bx, floor_y + h_blocks - 1, bz, top_block)
         if has_pitched:
             writer.set_block(bx, floor_y + h_blocks, bz, RED_ROOF)
+        # Hängende Deckenlaterne pro Stockwerk, jede ~4x4-Zelle einmal
+        if not has_pitched and (bx % 4 == 2) and (bz % 4 == 2):
+            for story in range(n_full_stories):
+                lamp_y = floor_y + (story + 1) * STORY_H - 1
+                writer.set_block(bx, lamp_y, bz, "minecraft:lantern[hanging=true]")
+
+    return floor_y + h_blocks  # tatsächliche gerenderte Top-Y
 
 
 def _write_level_dat():
@@ -1102,6 +1251,144 @@ def save_preview(dgm, ndsm_cls, ndsm, osm_raster, lod2_mask):
 
 
 # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# TILED MODE
+# ─────────────────────────────────────────────
+
+def _tile_worker(args):
+    """Top-level Worker-Funktion für ProcessPoolExecutor (muss pickelbar sein)."""
+    (c0, c1, r0, r1, lc0, lc1, lr0, lr1,
+     dgm_t, ndsm_cls_t, ndsm_t, osm_t,
+     lod2_mask_t, lod2_h_t, lod2_rmc_t, lod2_rtype_t,
+     bridge_t, ortslage_t, church_mask_t,
+     tile_ox, tile_oy, dgm_res,
+     church_points, alkis_buildings, output_dir, real_min_h) = args
+
+    global REAL_MIN_H
+    REAL_MIN_H = real_min_h
+
+    from anvil_writer import WorldWriter
+
+    writer = WorldWriter(
+        output_dir,
+        x_offset=lc0, z_offset=lr0,
+        tile_min_x=c0, tile_max_x=c1 - 1,
+        tile_min_z=r0, tile_max_z=r1 - 1,
+    )
+    write_minecraft_world(
+        dgm_t, ndsm_cls_t, ndsm_t,
+        osm_t, lod2_mask_t, lod2_h_t,
+        lod2_rmc_t, lod2_rtype_t,
+        dgm_ox=tile_ox, dgm_oy=tile_oy, dgm_res=dgm_res,
+        buildings=None,                   # Geometrien nicht pickle-n; Kirche via precomp
+        alkis_buildings=alkis_buildings,
+        bridge_mask=bridge_t, ortslage_mask=ortslage_t,
+        writer=writer, _is_tile=True,
+        output_dir=output_dir,
+        precomp_church_mask=church_mask_t,
+        church_points=church_points,
+    )
+    return c0, r0
+
+
+def _write_tiled(dgm, ndsm_classes, ndsm,
+                 osm_raster, lod2_mask, lod2_heights,
+                 lod2_roof_mc, lod2_roof_type,
+                 dgm_ox=0, dgm_oy=0, dgm_res=1.0,
+                 buildings=None, alkis_buildings=None,
+                 bridge_mask=None, ortslage_mask=None,
+                 tile_size=512, n_workers=4):
+    import gc
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from anvil_writer import WorldWriter, write_level_dat
+
+    H, W    = dgm.shape
+    OVERLAP = 64
+    n_tx    = max(1, -(-W // tile_size))
+    n_tz    = max(1, -(-H // tile_size))
+    total   = n_tx * n_tz
+    print(f"  Tiled-Modus: {n_tx}×{n_tz} = {total} Tiles, {n_workers} Worker")
+
+    # Kirchen einmal im Main-Prozess berechnen → als numpy-Mask weitergeben
+    print("  Vorberechnung Kirchen-Maske...")
+    from atkis_layer import CHURCH_POINTS as _CP
+    _church_pts = list(_CP) if _CP else []
+    # Einfache Vorab-Berechnung: nur Methode 2 (>40m) geht ohne Geometrien
+    # Methode 1+3 werden in den Workern via precomp_church_mask geliefert
+    from scipy.ndimage import label as _ndlabel
+    _bldg_bool   = lod2_mask == 1
+    _labeled, _  = _ndlabel(_bldg_bool)
+    _church_mask = np.zeros(dgm.shape, dtype=bool)
+    # Methode 2: >40m
+    for _cid in np.unique(_labeled):
+        if _cid == 0: continue
+        _comp = _labeled == _cid
+        if float(lod2_heights[_comp].max()) > 40:
+            _church_mask[_comp] = True
+    # Methode 1: ATKIS CHURCH_POINTS + buildings-Geometrien (Main-Prozess hat sie)
+    if _church_pts and buildings:
+        from shapely.geometry import Point
+        _dgm_north = dgm_oy + H * dgm_res
+        for _cx, _cy in _church_pts:
+            _pt = Point(_cx, _cy)
+            for _bldg in buildings:
+                _fp = _bldg.get("footprint")
+                if _fp is None or _fp.distance(_pt) >= 150: continue
+                try: _tp = _fp.representative_point()
+                except: _tp = _fp.centroid
+                _ci = int(round((_tp.x - dgm_ox) / dgm_res))
+                _ri = int(round((_dgm_north - _tp.y) / dgm_res))
+                if 0 <= _ri < H and 0 <= _ci < W:
+                    _cid2 = int(_labeled[_ri, _ci])
+                    if _cid2 > 0: _church_mask[_labeled == _cid2] = True
+    print(f"    {int(_church_mask.sum()):,} Kirchen-Pixel")
+
+    # Tile-Args zusammenstellen
+    tile_args = []
+    for tz in range(n_tz):
+        for tx in range(n_tx):
+            c0 = tx * tile_size;  c1 = min(c0 + tile_size, W)
+            r0 = tz * tile_size;  r1 = min(r0 + tile_size, H)
+            lc0 = max(0, c0 - OVERLAP);  lc1 = min(W, c1 + OVERLAP)
+            lr0 = max(0, r0 - OVERLAP);  lr1 = min(H, r1 + OVERLAP)
+
+            def _sl(a, _lr0=lr0, _lr1=lr1, _lc0=lc0, _lc1=lc1):
+                return a[_lr0:_lr1, _lc0:_lc1].copy() if a is not None else None
+
+            tile_ox = dgm_ox + lc0 * dgm_res
+            tile_oy = dgm_oy + (H - lr1) * dgm_res
+
+            tile_args.append((
+                c0, c1, r0, r1, lc0, lc1, lr0, lr1,
+                _sl(dgm), _sl(ndsm_classes), _sl(ndsm), _sl(osm_raster),
+                _sl(lod2_mask), _sl(lod2_heights), _sl(lod2_roof_mc), _sl(lod2_roof_type),
+                _sl(bridge_mask), _sl(ortslage_mask), _sl(_church_mask),
+                tile_ox, tile_oy, dgm_res,
+                _church_pts, alkis_buildings, OUTPUT_DIR, REAL_MIN_H,
+            ))
+
+    done = 0
+    with ProcessPoolExecutor(max_workers=n_workers) as exe:
+        futs = {exe.submit(_tile_worker, a): (a[0], a[2]) for a in tile_args}
+        for fut in as_completed(futs):
+            c0_d, r0_d = futs[fut]
+            done += 1
+            try:
+                fut.result()
+                print(f"  [{done}/{total}] Tile col={c0_d} row={r0_d}  ✓")
+            except Exception as exc:
+                print(f"  [{done}/{total}] Tile col={c0_d} row={r0_d}  FEHLER: {exc}")
+
+    write_level_dat(OUTPUT_DIR, spawn_x=W // 2, spawn_y=100, spawn_z=H // 2)
+    import shutil
+    saves_dir = os.path.join(os.environ.get("APPDATA", ""), ".minecraft", "saves", OUTPUT_DIR)
+    if os.path.exists(saves_dir):
+        shutil.rmtree(saves_dir)
+    shutil.copytree(OUTPUT_DIR, saves_dir)
+    print(f"  → Kopiert nach: {saves_dir}")
+
+
+# ─────────────────────────────────────────────
 # ARGS & MAIN
 # ─────────────────────────────────────────────
 
@@ -1123,6 +1410,10 @@ def parse_args():
                    help="OSM-Schritt ueberspringen (offline / schneller)")
     p.add_argument("--no-lod2",  action="store_true",
                    help="LoD2-Schritt ueberspringen")
+    p.add_argument("--tiled",    action="store_true",
+                   help="Tile-by-Tile verarbeiten (spart RAM bei großen Gebieten)")
+    p.add_argument("--tile-size", type=int, default=512,
+                   help="Tile-Breite in Metern / Blöcken (default: 512 = 1 Region)")
     return p.parse_args()
 
 
@@ -1234,6 +1525,24 @@ def main():
         features   = load_osm_layers(actual_bbox)
         osm_raster = burn_osm_to_raster(features, actual_bbox, dgm.shape)
 
+        # Originale Wasserroute rastern (vor Priority-Overwrite durch Gravel/Straße)
+        # → wird später für Infrastrukturgebäude-Bereinigung genutzt
+        from rasterio.features import rasterize as _rast_w
+        from rasterio.transform import from_bounds as _tfb_w
+        _w_transform = _tfb_w(actual_bbox["west"], actual_bbox["south"],
+                               actual_bbox["east"],  actual_bbox["north"],
+                               dgm.shape[1], dgm.shape[0])
+        water_path_mask = np.zeros(dgm.shape, dtype=bool)
+        for _wg, _wc, _wp in features:
+            if _wc in (1, 2):
+                try:
+                    _wb = _rast_w([(_wg, 1)], out_shape=dgm.shape,
+                                  transform=_w_transform, fill=0,
+                                  dtype=np.uint8, all_touched=True)
+                    water_path_mask |= _wb > 0
+                except Exception:
+                    pass
+
         # Ortslage-Maske: Laternen nur innerhalb AX_Ortslage
         ortslage_polys = load_ortslage_polygons(actual_bbox)
         ortslage_mask = np.zeros(dgm.shape, dtype=bool)
@@ -1249,38 +1558,33 @@ def main():
             ortslage_mask = _burned > 0
             print(f"  Ortslage-Maske: {int(ortslage_mask.sum()):,} px")
 
-        # Wasser-Pixel unter LoD2-Gebaeuden entfernen + minimale Dilation
-        # ATKIS-Daten ueberschneiden sich geometrisch nicht mit Strassen,
-        # daher nur 3px Puffer fuer Rasterisierungs-Ungenauigkeiten.
-        from scipy.ndimage import binary_dilation as _bdil, maximum_filter as _mxf2
+        # Straßen haben höchste Priorität (prio 15-20) → überschreiben alles im Raster.
+        # Brücken: Straßenpixel die auf der originalen Wasserroute liegen → bridge_mask.
         road_mask    = (osm_raster >= 10) & (osm_raster <= 20)
         water_mask   = np.isin(osm_raster, [1, 2])
         bldg_mask_2d = lod2_mask == 1
         bridge_mask  = np.zeros(osm_raster.shape, dtype=bool)
-        if water_mask.any():
-            road_dilated_mask = _bdil(road_mask, iterations=4)
-            cross_mask = water_mask & road_dilated_mask
-            if cross_mask.any():
-                # Lücken nur DIREKT an cross_mask-Pixeln — nicht das ganze Dreieck
-                near_cross = _bdil(cross_mask, iterations=2)
-                road_gap_mask = near_cross & ~road_mask & ~water_mask & ~cross_mask
-                road_val_map = np.where(road_mask, osm_raster, 0).astype(np.int32)
-                road_dilated_vals = _mxf2(road_val_map, size=9)
-                fill_mask = cross_mask | road_gap_mask
-                osm_raster[fill_mask] = road_dilated_vals[fill_mask]
-                bridge_mask |= fill_mask
-                print(f"  Straße über Fluss: {int(cross_mask.sum())} px Wasser, {int(road_gap_mask.sum())} px Lücken")
-            remove_mask = water_mask & bldg_mask_2d
-            osm_raster[remove_mask] = 0
-            if remove_mask.any():
-                print(f"  Wasser an Gebaeuden entfernt: {int(remove_mask.sum())} px")
 
-        # Kleine, flache LoD2-Gebaeude (< 4m) die auf Wasser-Pixeln liegen
-        # sind Infrastrukturbauten (Pumpwerke, Schaechte) entlang des Flusses.
-        # Sie rendern als stone_bricks und stoeren das Flussbild → aus lod2_mask entfernen.
-        water_after = np.isin(osm_raster, [1, 2])
-        if water_after.any() and (lod2_mask == 1).any():
-            small_flat = (lod2_mask == 1) & (lod2_heights < 4.0) & water_after
+        cross_mask = water_path_mask & road_mask
+        if cross_mask.any():
+            bridge_mask |= cross_mask
+            print(f"  Brücken erkannt: {int(cross_mask.sum())} px (Straße × Wasserroute)")
+
+        # Sichtbares Wasser unter Gebäuden entfernen
+        remove_mask = water_mask & bldg_mask_2d
+        osm_raster[remove_mask] = 0
+        if remove_mask.any():
+            print(f"  Wasser an Gebaeuden entfernt: {int(remove_mask.sum())} px")
+
+        # Straße/Gravel überschreibt LoD2 (<6m) → keine stone_bricks auf Fahrbahn
+        _road_gravel = road_mask | (osm_raster == 35)
+        lod2_mask[_road_gravel & (lod2_heights < 6.0)] = 0
+
+        # Kleine Infrastrukturgebäude (<4m) entlang der ORIGINALEN Wasserroute entfernen.
+        # water_path_mask enthält die Route vor Priority-Overwrite durch Gravel/Straße,
+        # damit Pumpwerke auch dann entfernt werden wenn das Wasser jetzt Gravel ist.
+        if water_path_mask.any() and (lod2_mask == 1).any():
+            small_flat = (lod2_mask == 1) & (lod2_heights < 4.0) & water_path_mask
             n_removed = int(small_flat.sum())
             if n_removed:
                 lod2_mask[small_flat] = 0
@@ -1296,14 +1600,27 @@ def main():
 
     # 7. Welt schreiben
     print("\n[7/7] Minecraft-Welt schreiben...")
-    write_minecraft_world(dgm, ndsm_cls, ndsm,
-                          osm_raster, lod2_mask, lod2_heights,
-                          lod2_roof_mc, lod2_roof_type,
-                          dgm_ox=dgm_ox, dgm_oy=dgm_oy, dgm_res=dgm_res,
-                          buildings=buildings,
-                          alkis_buildings=alkis_buildings,
-                          bridge_mask=bridge_mask,
-                          ortslage_mask=ortslage_mask)
+    H_px, W_px = dgm.shape
+    auto_tiled = (H_px * W_px) > (1024 * 1024)
+    if auto_tiled and not args.tiled:
+        print(f"  (Auto-Tiled: {W_px}×{H_px} px > 1024×1024 — tiled wird automatisch aktiviert)")
+    if args.tiled or auto_tiled:
+        _write_tiled(dgm, ndsm_cls, ndsm,
+                     osm_raster, lod2_mask, lod2_heights,
+                     lod2_roof_mc, lod2_roof_type,
+                     dgm_ox=dgm_ox, dgm_oy=dgm_oy, dgm_res=dgm_res,
+                     buildings=buildings, alkis_buildings=alkis_buildings,
+                     bridge_mask=bridge_mask, ortslage_mask=ortslage_mask,
+                     tile_size=args.tile_size, n_workers=args.workers)
+    else:
+        write_minecraft_world(dgm, ndsm_cls, ndsm,
+                              osm_raster, lod2_mask, lod2_heights,
+                              lod2_roof_mc, lod2_roof_type,
+                              dgm_ox=dgm_ox, dgm_oy=dgm_oy, dgm_res=dgm_res,
+                              buildings=buildings,
+                              alkis_buildings=alkis_buildings,
+                              bridge_mask=bridge_mask,
+                              ortslage_mask=ortslage_mask)
 
     print("\n✓ Fertig! 🎮")
 

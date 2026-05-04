@@ -330,8 +330,17 @@ def write_level_dat(output_dir, world_name="Thueringen2Minecraft",
 # ─────────────────────────────────────────────
 
 class WorldWriter:
-    def __init__(self, output_dir):
+    def __init__(self, output_dir, x_offset=0, z_offset=0,
+                 tile_min_x=None, tile_max_x=None,
+                 tile_min_z=None, tile_max_z=None):
         self.output_dir = output_dir
+        self.x_offset   = x_offset
+        self.z_offset   = z_offset
+        # Optional tile bounds (global coords): blocks outside are silently dropped
+        self._xmin = tile_min_x
+        self._xmax = tile_max_x
+        self._zmin = tile_min_z
+        self._zmax = tile_max_z
         self._data     = defaultdict(
             lambda: defaultdict(
                 lambda: defaultdict(dict)
@@ -345,6 +354,12 @@ class WorldWriter:
         if y < -64 or y > 319:
             return
         if block_name == AIR:
+            return
+        x += self.x_offset
+        z += self.z_offset
+        if self._xmin is not None and not (self._xmin <= x <= self._xmax):
+            return
+        if self._zmin is not None and not (self._zmin <= z <= self._zmax):
             return
 
         cx  = x >> 4;   cz  = z >> 4
@@ -383,6 +398,12 @@ class WorldWriter:
     def delete_block(self, x, y, z):
         """Entfernt einen Block (setzt ihn auf Luft) — funktioniert auch wenn er schon gesetzt wurde."""
         if y < -64 or y > 319:
+            return
+        x += self.x_offset
+        z += self.z_offset
+        if self._xmin is not None and not (self._xmin <= x <= self._xmax):
+            return
+        if self._zmin is not None and not (self._zmin <= z <= self._zmax):
             return
         cx = x >> 4; cz = z >> 4
         rx = cx >> 5; rz = cz >> 5

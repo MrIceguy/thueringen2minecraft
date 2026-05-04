@@ -30,23 +30,25 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────────
 
 OSM_CLASSES = {
-    1:  ("minecraft:water",               4,  10, "Fluss / Bach"),
-    2:  ("minecraft:water",               2,   9, "See / Teich"),
-    10: ("minecraft:gray_concrete",        8,   8, "Autobahn / Bundesstraße"),
-    11: ("minecraft:light_gray_concrete",  6,   7, "Landstraße"),
-    12: ("minecraft:smooth_stone",         5,   6, "Kreisstraße"),
-    13: ("minecraft:stone_slab",           4,   5, "Gemeindestraße"),
-    14: ("minecraft:stone_bricks",         3,   4, "Wohnstraße"),
-    15: ("minecraft:cobblestone",          2,   3, "Feldweg / Wirtschaftsweg"),
-    16: ("minecraft:dirt_path",            2,   3, "Fußweg / Pfad"),
-    17: ("minecraft:oak_planks",           3,   3, "Radweg"),
-    20: ("minecraft:rail",                 2,   6, "Bahnstrecke"),
+    1:  ("minecraft:water",               4,  15, "Fluss / Bach"),
+    2:  ("minecraft:water",               2,  15, "See / Teich"),
+    10: ("minecraft:gray_concrete",        8,  20, "Autobahn / Bundesstraße"),
+    11: ("minecraft:light_gray_concrete",  6,  19, "Landstraße"),
+    12: ("minecraft:smooth_stone",         5,  18, "Kreisstraße"),
+    13: ("minecraft:stone_slab",           4,  17, "Gemeindestraße"),
+    14: ("minecraft:stone_bricks",         3,  16, "Wohnstraße"),
+    15: ("minecraft:cobblestone",          2,  15, "Feldweg / Wirtschaftsweg"),
+    16: ("minecraft:cobblestone",          2,  15, "Fußweg / Pfad"),
+    17: ("minecraft:oak_planks",           3,  15, "Radweg"),
+    20: ("minecraft:rail",                 2,  18, "Bahnstrecke"),
     30: ("minecraft:grass_block",          0,   1, "Grünland / Wiese"),
     31: ("minecraft:moss_block",           0,   1, "Wald"),
     32: ("minecraft:sand",                 0,   2, "Sandfläche"),
-    33: ("minecraft:grass_block",          0,   2, "Ackerland"),   # Prio 2, keine Bäume
-    34: ("minecraft:grass_block",          0,   2, "Landwirtschaft"),  # Prio 2, keine Bäume
-    35: ("minecraft:gravel",               0,   5, "Schotter / Verkehrsfläche"),
+    33: ("minecraft:grass_block",          0,   2, "Ackerland"),
+    34: ("minecraft:grass_block",          0,   2, "Landwirtschaft"),
+    35: ("minecraft:stone_bricks",         0,  14, "Schotter / Verkehrsfläche"),
+    36: ("minecraft:gravel",               0,  14, "Platz / Vorplatz"),
+    37: ("minecraft:gray_concrete",        0,  14, "Gewerbe / Industrie"),
 }
 
 def get_osm_block(osm_value):
@@ -79,7 +81,7 @@ VERKEHR_MAP = {
     "AX_Kreisstrasse":              12,
     "AX_Gemeindestrasse":           13,
     "AX_Strassenverkehr":           35,   # Straßenverkehrsfläche → Schotter
-    "AX_Platz":                     35,   # Platz → Schotter
+    "AX_Platz":                     36,   # Platz → Kies
     "AX_Weg":                       15,
     "AX_FussWandRadweg":            16,
     "AX_Bahnstrecke":               20,
@@ -91,7 +93,7 @@ VERKEHR_MAP = {
     "42006": 12,  # Kreisstraße
     "42007": 13,  # Gemeindestraße
     "42008": 14,  # Wirtschaftsweg
-    "42009": 35,  # AX_Platz → Schotter
+    "42009": 36,  # AX_Platz → Kies
     "42010": 15,  # Weg
     "42015": 16,  # Fußweg
     "42016": 17,  # Radweg
@@ -102,7 +104,7 @@ VERKEHR_MAP = {
 
 # Breitenangaben in Metern (für Linien-Puffer)
 VERKEHR_BREITE = {
-    10: 8, 11: 6, 12: 5, 13: 4, 14: 3, 15: 2, 16: 2, 17: 3, 20: 2,
+    10: 6, 11: 5, 12: 4, 13: 3, 14: 2, 15: 2, 16: 2, 17: 2, 20: 2,
 }
 
 # Gewässer (gew)
@@ -116,7 +118,7 @@ GEWAESSER_MAP = {
     "44300": 2,  # stehendes Gewässer
     "44001": 1,  # Fließgewässer (Achse)
     "44002": 1,  # Fließgewässer (Fläche)
-    "44006": 1,  # Kanal
+    "44006": 2,  # AX_StehendesGewaesser (Teich/See)
     "44007": 2,  # See / Teich
     "44008": 2,  # Hafenbecken
 }
@@ -158,15 +160,15 @@ SIEDLUNG_MAP = {
     "AX_SportFreizeitUndErholungsflaeche": 30,
     "AX_Friedhof":                         30,
     "AX_Grünanlage":                       30,
-    "AX_FlaecheGemischterNutzung":         35,  # Mischnutzung → Schotter
+    "AX_FlaecheGemischterNutzung":         30,  # Mischnutzung → Wiese
     "AX_Wohnbauflaeche":                   30,  # Wohnbaufläche → Wiese
-    "AX_IndustrieUndGewerbeflaeche":       35,  # Gewerbe → Schotter
-    "AX_FlaecheBesondererFunktionalerPraegung": 35,
+    "AX_IndustrieUndGewerbeflaeche":       37,  # Gewerbe → gray_concrete
+    "AX_FlaecheBesondererFunktionalerPraegung": 30,  # Schule/Krankenhaus → Wiese
     "41008": 30,  # Sport-/Freizeitanlage
     "41009": 30,  # Campingplatz
     "41010": 30,  # Friedhof
-    "41006": 35,  # Gemischte Fläche → Schotter
-    "41007": 35,  # Besondere Prägung → Schotter
+    "41006": 30,  # Gemischte Fläche → Wiese
+    "41007": 30,  # Besondere Prägung → Wiese
     "41001": 30,  # Wohnbau → Wiese
     "41002": 35,  # Gewerbe → Schotter
 }
@@ -187,7 +189,7 @@ def _find_files(folder, extensions):
     return sorted(found)
 
 
-def _load_geodataframe(folder, bbox_utm):
+def _load_geodataframe(folder, bbox_utm, exclude_stems=None):
     """
     Lädt alle Vektor-Dateien aus einem Ordner als GeoDataFrame.
     Unterstützt: .shp, .gpkg, .geojson, .xml (NAS/GML), .gml
@@ -197,9 +199,12 @@ def _load_geodataframe(folder, bbox_utm):
     import geopandas as gpd
     from shapely.geometry import box as shapely_box
 
-    shp_files  = _find_files(folder, [".shp"])
-    gpkg_files = _find_files(folder, [".gpkg"])
-    gml_files  = _find_files(folder, [".xml", ".gml"])
+    def _excluded(f):
+        return exclude_stems and any(ex in f.stem.lower() for ex in exclude_stems)
+
+    shp_files  = [f for f in _find_files(folder, [".shp"])          if not _excluded(f)]
+    gpkg_files = [f for f in _find_files(folder, [".gpkg"])         if not _excluded(f)]
+    gml_files  = [f for f in _find_files(folder, [".xml", ".gml"])  if not _excluded(f)]
 
     gdfs = []
 
@@ -328,6 +333,35 @@ def load_osm_layers(bbox, osm_file=None, cache_dir=None):
     # ── Verkehr ──────────────────────────────
     ver_dir = atkis_root / "ver"
     if ver_dir.exists():
+        # ver02_l: Fußwege explizit laden (OBJART unbekannt → würde sonst übersprungen)
+        _ver02 = ver_dir / "ver02_l.shp"
+        if _ver02.exists():
+            try:
+                import geopandas as gpd
+                from shapely.geometry import box as _sbx2
+                _gdf2 = gpd.read_file(str(_ver02))
+                if _gdf2.crs and _gdf2.crs.to_epsg() != 25832:
+                    _gdf2 = _gdf2.to_crs("EPSG:25832")
+                _bb2 = _sbx2(bbox["west"], bbox["south"], bbox["east"], bbox["north"])
+                _gdf2 = _gdf2[_gdf2.geometry.intersects(_bb2)]
+                _fw_w = VERKEHR_BREITE.get(16, 2)
+                _n2 = 0
+                for _, _r2 in _gdf2.iterrows():
+                    _g2 = _r2.geometry
+                    if _g2 is None or _g2.is_empty:
+                        continue
+                    try:
+                        _buf2 = _g2.buffer(_fw_w / 2) if _g2.geom_type in ("LineString", "MultiLineString") else _g2
+                        if _buf2.is_valid and not _buf2.is_empty:
+                            features.append((_buf2, 16, 5))
+                            _n2 += 1
+                    except Exception:
+                        pass
+                if _n2:
+                    print(f"    {_n2} Fußweg-Features (ver02_l, cls 16 prio 5)")
+            except Exception as _e2:
+                print(f"    ⚠ ver02_l: {_e2}")
+
         print("  Lade Verkehr (Straßen, Bahn)...")
         gdf = _load_geodataframe(ver_dir, bbox)
         if gdf is not None:
@@ -339,7 +373,7 @@ def load_osm_layers(bbox, osm_file=None, cache_dir=None):
                     continue
                 cls = _get_class(row.get(col) if col else None, VERKEHR_MAP)
                 if cls is None:
-                    cls = 14   # Fallback: Wohnstraße
+                    continue   # unbekannte OBJART überspringen
                 width = VERKEHR_BREITE.get(cls, 3)
                 prio  = OSM_CLASSES[cls][2]
                 try:
@@ -366,9 +400,15 @@ def load_osm_layers(bbox, osm_file=None, cache_dir=None):
         if gdf is not None:
             col = _detect_type_column(gdf)
             n = 0
+            _has_nam = 'NAM' in gdf.columns
             for _, row in gdf.iterrows():
                 geom = row.geometry
                 if geom is None or geom.is_empty:
+                    continue
+                # Namenlose Linien-Gewässer = Drainage/Verrohrung → überspringen
+                if (_has_nam
+                        and geom.geom_type in ("LineString", "MultiLineString")
+                        and not row.get('NAM')):
                     continue
                 raw = row.get(col) if col else None
                 cls = _get_class(raw, GEWAESSER_MAP) or 1

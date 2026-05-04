@@ -71,6 +71,12 @@ python download_geodata.py --bbox W E S N --download
 python thueringen2minecraft.py --bbox W E S N
 ```
 
+Für große Gebiete (> 1 km²) empfohlen:
+
+```bash
+python thueringen2minecraft.py --bbox W E S N --tiled --workers 4
+```
+
 Fertige Welt landet automatisch in `%AppData%\.minecraft\saves\`.
 
 ---
@@ -114,14 +120,22 @@ index.html                 ← Browser-UI zur Kachelauswahl
 - Übergangswände zwischen unterschiedlich hohen Gebäudeteilen
 - Mehrere Treppenhäuser in großen Gebäuden (alle ~50 m)
 - Hängende Laternen in allen Stockwerken
+- Farbige Teppiche (3×3, zentriert) pro Stockwerk
 
 **Kirchen** (erkannt über ATKIS AX_Turm + LoD2 >40 m):
 - Wände aus stone_bricks, automatische Erkennung
 
 **Terrain & Umgebung**:
 - Echte Topografie aus DGM1
-- Straßen, Bahnlinien, Flüsse, Seen, Wald, Grünland
-- Bäume mit realer Höhe aus DOM-nDSM
+- Straßen nach Widmung: gray_concrete (Autobahn) → stone_bricks (Wohnstraße) → cobblestone (Feldweg)
+- Plätze und Vorplätze: gravel
+- Industrie- und Gewerbeflächen: gray_concrete
+- Bahnlinien, Flüsse, Seen (stehende Gewässer immer als Wasser), Wald, Grünland
+- Bäume und Büsche mit realer Höhe aus DOM-nDSM
+
+**Performance**:
+- `--tiled` für große Gebiete: parallele Kacheln mit mehreren CPU-Kernen (`--workers N`)
+- Automatisches Tiling bei Gebieten > 1024×1024 px
 
 ---
 

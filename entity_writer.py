@@ -45,6 +45,21 @@ BED_COLORS = [
     "orange", "cyan", "purple", "brown", "light_blue",
 ]
 
+CARPET_COLORS = [
+    "red", "blue", "green", "yellow", "white",
+    "orange", "cyan", "purple", "brown", "light_blue",
+]
+
+FLOWER_POTS = [
+    "minecraft:potted_dandelion",
+    "minecraft:potted_red_tulip",
+    "minecraft:potted_blue_orchid",
+    "minecraft:potted_fern",
+    "minecraft:potted_cornflower",
+    "minecraft:potted_oak_sapling",
+    "minecraft:potted_cactus",
+]
+
 
 def _make_villager_nbt(x, y, z, profession=None, uid=None):
     """Erstellt ein vollständiges Dorfbewohner-NBT-Compound."""
@@ -161,21 +176,46 @@ def _write_entity_region(rx, rz, entity_chunks, output_dir):
 class EntityWriter:
     """Sammelt Entities und schreibt Entity-Region-Dateien."""
 
-    def __init__(self, output_dir):
+    def __init__(self, output_dir, x_offset=0, z_offset=0,
+                 tile_min_x=None, tile_max_x=None,
+                 tile_min_z=None, tile_max_z=None):
         self.output_dir = output_dir
+        self.x_offset   = x_offset
+        self.z_offset   = z_offset
+        self._xmin = tile_min_x
+        self._xmax = tile_max_x
+        self._zmin = tile_min_z
+        self._zmax = tile_max_z
         # region → chunk → [entity_nbt]
         self._data = defaultdict(lambda: defaultdict(list))
         self._count = 0
 
+    def _in_bounds(self, gx, gz):
+        if self._xmin is not None and not (self._xmin <= gx <= self._xmax):
+            return False
+        if self._zmin is not None and not (self._zmin <= gz <= self._zmax):
+            return False
+        return True
+
     def add_entity(self, x, y, z, nbt):
-        cx = x >> 4;  cz = z >> 4
-        rx = cx >> 5; rz = cz >> 5
+        gx = x + self.x_offset
+        gz = z + self.z_offset
+        if not self._in_bounds(gx, gz):
+            return
+        cx = gx >> 4;  cz = gz >> 4
+        rx = cx >> 5;  rz = cz >> 5
         self._data[(rx, rz)][(cx, cz)].append(nbt)
         self._count += 1
 
     def spawn_villager(self, x, y, z, profession=None):
-        nbt = _make_villager_nbt(x, y, z, profession)
-        self.add_entity(x, y, z, nbt)
+        gx, gz = x + self.x_offset, z + self.z_offset
+        if not self._in_bounds(gx, gz):
+            return
+        nbt = _make_villager_nbt(gx, y, gz, profession)
+        cx = gx >> 4;  cz = gz >> 4
+        rx = cx >> 5;  rz = cz >> 5
+        self._data[(rx, rz)][(cx, cz)].append(nbt)
+        self._count += 1
 
     def save(self):
         regions = list(self._data.items())
@@ -297,6 +337,10 @@ def populate_city(writer_blocks, entity_writer,
         STORY_H  = 4
         n_stories = (roof_y - comp_floor_y) // STORY_H
 
+        # Garagen / kleine Nebengebäude: einstöckig + kleine Fläche → kein Spawn
+        if n_stories <= 1 and area < 25:
+            n_skip_area += 1; continue
+
         # Wand-nahe Pixel: genau 1px von Wand entfernt → ideal für Betten
         wall_adjacent = comp_interior & ~(_be(comp_interior, structure=struct, border_value=0))
         wall_adj_pixels = np.argwhere(wall_adjacent & comp)
@@ -323,6 +367,7 @@ def populate_city(writer_blocks, entity_writer,
 
         used = set()
         beds_placed = 0
+        n_eff_stories = max(1, n_stories)
         for i in range(min(n_res * 10, len(bed_candidates))):
             if beds_placed >= n_res:
                 break
@@ -330,14 +375,17 @@ def populate_city(writer_blocks, entity_writer,
             r, c = int(bed_candidates[idx][0]), int(bed_candidates[idx][1])
             if (r, c) in used or door_mask[r, c] or (r, c) in stair_zone:
                 continue
-            # Bett nicht direkt neben Tür
             near_door = door_mask[max(0,r-2):min(dgm_shape[0],r+3),
                                   max(0,c-2):min(dgm_shape[1],c+3)].any()
             if near_door:
                 continue
 
-            bed_y = comp_floor_y + 1
-            color = BED_COLORS[abs(hash((c, r))) % len(BED_COLORS)]
+            story  = beds_placed % n_eff_stories
+            bed_y  = comp_floor_y + story * STORY_H + 1
+            eff_roof_rc = max(int(lod2_roof_mc[r, c]), int(smooth_floor[r, c]) + STORY_H)
+            if eff_roof_rc < comp_floor_y + (story + 1) * STORY_H:
+                continue
+            color  = BED_COLORS[abs(hash((c, r))) % len(BED_COLORS)]
 
             for facing, fr, fc in [("north", r+1, c), ("south", r-1, c),
                                     ("west",  r,   c+1), ("east", r,   c-1)]:
@@ -345,21 +393,19 @@ def populate_city(writer_blocks, entity_writer,
                         and comp_interior[fr, fc]
                         and not door_mask[fr, fc]
                         and (fr, fc) not in used
-                        and (fr, fc) not in stair_zone):
+                        and (fr, fc) not in stair_zone
+                        and max(int(lod2_roof_mc[fr, fc]), int(smooth_floor[fr, fc]) + STORY_H) >= comp_floor_y + (story + 1) * STORY_H):
                     writer_blocks.set_block(c,  bed_y, r,  f"minecraft:{color}_bed[part=head,facing={facing},occupied=false]")
                     writer_blocks.set_block(fc, bed_y, fr, f"minecraft:{color}_bed[part=foot,facing={facing},occupied=false]")
                     used.add((r, c)); used.add((fr, fc))
                     beds_placed += 1; n_beds += 1
                     break
 
-        # Arbeitsstationen — in der Mitte des Raums, nicht neben Türen
+        # Arbeitsstationen am Boden, in der Mitte des Raums
         if len(interior_pixels) > 0:
-            # Mittelpunkt der Innen-Pixel berechnen
             center_r = int(np.median(interior_pixels[:, 0]))
             center_c = int(np.median(interior_pixels[:, 1]))
-            # Nächsten Innen-Pixel zum Mittelpunkt suchen der nicht belegt und nicht neben Tür
-            best_ws = None
-            best_dist = 9999
+            best_ws = None; best_dist = 9999
             for ip_r, ip_c in interior_pixels:
                 ir, ic = int(ip_r), int(ip_c)
                 if (ir, ic) in used: continue
@@ -367,20 +413,53 @@ def populate_city(writer_blocks, entity_writer,
                              max(0,ic-2):min(dgm_shape[1],ic+3)].any(): continue
                 dist = abs(ir - center_r) + abs(ic - center_c)
                 if dist < best_dist:
-                    best_dist = dist
-                    best_ws = (ir, ic)
+                    best_dist = dist; best_ws = (ir, ic)
             if best_ws:
                 wr, wc = best_ws
-                ws_block = get_workstation_block(wc, wr)
-                writer_blocks.set_block(wc, comp_floor_y + 1, wr, ws_block)
+                writer_blocks.set_block(wc, comp_floor_y + 1, wr, get_workstation_block(wc, wr))
                 used.add((wr, wc))
 
-        # Villager auf comp_floor_y + 1 spawnen
+        # Gemütlichkeit: Bücherregale, Teppiche, Blumentöpfe pro Stockwerk
+        wa_px = wall_adj_pixels if len(wall_adj_pixels) >= 2 else interior_pixels
+        for story in range(n_eff_stories):
+            story_y = comp_floor_y + story * STORY_H
+            story_min_roof = comp_floor_y + (story + 1) * STORY_H
+            # Bücherregal an Wand (y = Boden+1), Topf obendrauf (y = Boden+2)
+            for k in range(len(wa_px)):
+                wi = (k * 13 + story * 7) % len(wa_px)
+                wr2, wc2 = int(wa_px[wi][0]), int(wa_px[wi][1])
+                near_door = door_mask[max(0,wr2-1):min(dgm_shape[0],wr2+2),
+                                      max(0,wc2-1):min(dgm_shape[1],wc2+2)].any()
+                if ((wr2, wc2) not in used and (wr2, wc2) not in stair_zone
+                        and not near_door
+                        and max(int(lod2_roof_mc[wr2, wc2]), int(smooth_floor[wr2, wc2]) + STORY_H) >= story_min_roof):
+                    writer_blocks.set_block(wc2, story_y + 1, wr2, "minecraft:bookshelf")
+                    pot = FLOWER_POTS[abs(hash((wc2, wr2))) % len(FLOWER_POTS)]
+                    writer_blocks.set_block(wc2, story_y + 2, wr2, pot)
+                    used.add((wr2, wc2)); break
+            # Teppich: zentriert, 3×3 (nur Interior-Pixel, keine Möbelkonflikte)
+            ip_set = {(int(p[0]), int(p[1])) for p in interior_pixels}
+            cr = int(np.median(interior_pixels[:, 0]))
+            cc = int(np.median(interior_pixels[:, 1]))
+            carpet = CARPET_COLORS[abs(hash((comp_id, story))) % len(CARPET_COLORS)]
+            for dr in range(-1, 2):
+                for dc in range(-1, 2):
+                    pr, pc = cr + dr, cc + dc
+                    if ((pr, pc) in ip_set and (pr, pc) not in stair_zone
+                            and max(int(lod2_roof_mc[pr, pc]), int(smooth_floor[pr, pc]) + STORY_H) >= story_min_roof):
+                        writer_blocks.set_block(pc, story_y + 1, pr, f"minecraft:{carpet}_carpet")
+
+        # Villager stockwerksweise spawnen
         spawn_pixels = interior_pixels
         for i in range(n_res):
-            sp_idx = (i * 5) % len(spawn_pixels)
-            sr, sc = spawn_pixels[sp_idx]
-            entity_writer.spawn_villager(int(sc), comp_floor_y + 1, int(sr))
+            sp_idx  = (i * 5) % len(spawn_pixels)
+            sr, sc  = spawn_pixels[sp_idx]
+            story   = i % n_eff_stories
+            sr_i, sc_i = int(sr), int(sc)
+            if max(int(lod2_roof_mc[sr_i, sc_i]), int(smooth_floor[sr_i, sc_i]) + STORY_H) < comp_floor_y + (story + 1) * STORY_H:
+                continue
+            vill_y  = comp_floor_y + story * STORY_H + 1
+            entity_writer.spawn_villager(int(sc), vill_y, int(sr))
             n_villagers += 1
 
         # Treppenhäuser: alle ~50px ein neues, bevorzugt an Türen
